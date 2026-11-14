@@ -15,6 +15,10 @@ import {
   REFLECTION_PARTS,
   type OptionKey,
 } from '../data/questions';
+import {
+  saveReflectionPart,
+  submitFullReflection,
+} from '../lib/studentApi';
 import type { StudentIdentity, SubmissionRecord } from '../types';
 
 interface ReflectionFormViewProps {
@@ -136,25 +140,13 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
 
     setIsSavingPart(true);
     try {
-      const response = await fetch('/api/submissions/part', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nama: student.nama,
-          kelas: student.kelas,
-          absen: student.absen,
-          password: student.password,
-          partId: currentPart.id,
-          answers,
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        setSubmitError(data.error || 'Gagal menyimpan bagian ini.');
+      const result = await saveReflectionPart(student, currentPart.id, answers);
+      if (!result.ok || !result.submission) {
+        setSubmitError(result.error || 'Gagal menyimpan bagian ini.');
         return;
       }
 
-      setSavedParts(data.submission?.completedParts || []);
+      setSavedParts(result.submission.completedParts || []);
       setPartSavedBanner(
         `${currentPart.shortTitle} berhasil disimpan dan dikirim ke data guru.`
       );
@@ -191,20 +183,9 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
 
     setIsSavingPart(true);
     try {
-      const response = await fetch('/api/submissions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nama: student.nama,
-          kelas: student.kelas,
-          absen: student.absen,
-          password: student.password,
-          answers,
-        }),
-      });
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        setSubmitError(data.error || 'Gagal mengirim refleksi akhir.');
+      const result = await submitFullReflection(student, answers);
+      if (!result.ok || !result.submission) {
+        setSubmitError(result.error || 'Gagal mengirim refleksi akhir.');
         return;
       }
       try {
@@ -212,7 +193,7 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
       } catch {
         // ignore
       }
-      onSubmitted(data.submission);
+      onSubmitted(result.submission);
     } catch {
       setSubmitError(
         'Koneksi terputus saat mengirim jawaban. Draft jawaban tetap aman, silakan coba klik Kirim lagi.'

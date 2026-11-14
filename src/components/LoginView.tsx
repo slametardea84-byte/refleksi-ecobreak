@@ -13,6 +13,7 @@ import {
   INSTRUCTIONS,
 } from '../data/questions';
 import type { StudentIdentity, SubmissionRecord } from '../types';
+import { loginStudent } from '../lib/studentApi';
 import heroSchoolImg from '../assets/images/hero_school_ecobrick_1794620524862.jpg';
 
 interface LoginViewProps {
@@ -56,31 +57,18 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
     setIsSubmitting(true);
     try {
-      const response = await fetch('/api/auth/student', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          nama: nama.trim(),
-          kelas,
-          absen: Number(absen),
-          password: password.trim(),
-        }),
+      const result = await loginStudent({
+        nama: nama.trim(),
+        kelas,
+        absen: Number(absen),
+        password: password.trim(),
       });
-      const data = await response.json();
-      if (!response.ok || !data.ok) {
-        setError(data.error || 'Identitas atau password tidak sesuai.');
+      if (!result.ok || !result.student) {
+        setError(result.error || 'Identitas atau password tidak sesuai.');
         return;
       }
 
-      onLoginSuccess(
-        {
-          nama: data.student.nama,
-          kelas: data.student.kelas,
-          absen: data.student.absen,
-          password: password.trim(),
-        },
-        data.existingSubmission || null
-      );
+      onLoginSuccess(result.student, result.existingSubmission || null);
     } catch {
       setError('Tidak dapat terhubung ke server. Periksa koneksi internetmu dan coba lagi.');
     } finally {

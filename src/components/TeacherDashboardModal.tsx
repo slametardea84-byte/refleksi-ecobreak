@@ -259,6 +259,22 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
   const [confirmAutoSyncModal, setConfirmAutoSyncModal] = useState(false);
   const [confirmDeleteTarget, setConfirmDeleteTarget] =
     useState<SubmissionRecord | null>(null);
+  const [copiedHostInfo, setCopiedHostInfo] = useState<'host' | 'origin' | ''>('');
+
+  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const isDefaultAuthorizedHost =
+    !currentHost ||
+    currentHost === 'localhost' ||
+    currentHost === '127.0.0.1' ||
+    currentHost.endsWith('.run.app') ||
+    currentHost.endsWith('.firebaseapp.com') ||
+    currentHost.endsWith('.web.app');
+  const isInAppBrowser =
+    typeof navigator !== 'undefined' &&
+    /FBAN|FBAV|Instagram|WhatsApp|Line|BytedanceWebview|TikTok|wv\)/i.test(
+      navigator.userAgent
+    );
 
   useEffect(() => {
     const onOnline = () => setIsOnline(true);
@@ -492,11 +508,30 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
           setWebhookUrl(wd.appsScriptWebhookUrl);
         }
       }
-    } catch (err) {
+    } catch (err: unknown) {
+      const code =
+        err && typeof err === 'object' && 'code' in err
+          ? String((err as { code?: unknown }).code || '')
+          : '';
       const msg = err instanceof Error ? err.message : '';
-      if (!msg.includes('popup-closed-by-user')) {
+      if (code === 'auth/popup-closed-by-user' || msg.includes('popup-closed-by-user')) {
+        return;
+      }
+      if (code === 'auth/unauthorized-domain' || msg.includes('unauthorized-domain')) {
         setAuthError(
-          'Gagal terhubung ke Google Drive & Google Sheets. Pastikan pop-up dan izin akses diberikan.'
+          `Ditolak Google (auth/unauthorized-domain): Domain "${currentHost}" belum terdaftar di Authorized Domains Firebase & Google Cloud Console. Buka link resmi Google AI Studio atau daftarkan domain ini terlebih dahulu sesuai panduan di bawah.`
+        );
+      } else if (code === 'auth/popup-blocked' || msg.includes('popup-blocked')) {
+        setAuthError(
+          'Pop-up login Google diblokir oleh browser. Izinkan pop-up untuk situs ini lalu coba lagi.'
+        );
+      } else if (isInAppBrowser) {
+        setAuthError(
+          'Login Google ditolak karena dibuka dari browser dalam aplikasi (seperti WhatsApp/Instagram). Silakan pilih "Buka di Browser" (Chrome / Safari).'
+        );
+      } else {
+        setAuthError(
+          `Gagal terhubung ke Google (${code || 'akses ditolak'}). Pastikan dibuka melalui Chrome/Safari pada domain yang sudah diizinkan dan pop-up aktif.`
         );
       }
     } finally {
@@ -748,7 +783,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
         </div>
 
         {!canShowDashboard ? (
-          <div className="p-8 max-w-md mx-auto w-full space-y-5 my-8 text-center">
+          <div className="p-6 sm:p-8 max-w-xl mx-auto w-full space-y-5 my-4 text-center overflow-y-auto">
             <div className="space-y-2">
               <h3 className="text-lg font-bold text-slate-900">
                 Masuk dengan Akun Google Guru
@@ -767,6 +802,15 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
               </div>
             )}
 
+            {isInAppBrowser && (
+              <div className="flex items-start gap-2 p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 text-left">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <span>
+                  Terdeteksi dibuka melalui browser bawaan WhatsApp/aplikasi lain. Google memblokir login di browser ini — silakan ketuk menu kanan atas lalu pilih <strong>Buka di Chrome / Browser</strong>.
+                </span>
+              </div>
+            )}
+
             {googleUser && !isTeacherAuthenticated && (
               <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 text-left">
                 Saat ini masuk sebagai <strong>{googleUser.email}</strong>. Silakan ganti ke akun guru <strong>{TEACHER_EMAIL}</strong>.
@@ -774,7 +818,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
             )}
 
             {authError && (
-              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 text-left">
+              <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-xs text-red-800 text-left leading-relaxed">
                 {authError}
               </div>
             )}
@@ -794,6 +838,94 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                 </span>
               </div>
             </button>
+
+            {(!isDefaultAuthorizedHost || authError.includes('unauthorized-domain')) && (
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 text-left text-xs text-slate-700 space-y-2.5">
+                <p className="font-bold text-slate-900">
+                  Catatan Hosting Vercel / Domain Kustom ({currentHost})
+                </p>
+                <p className="leading-relaxed">
+                  Google menolak login popup jika domain Vercel belum didaftarkan ke proyek Firebase/Google Cloud. Anda memiliki <strong>2 pilihan</strong>:
+                </p>
+                <ol className="list-decimal pl-4 space-y-1.5 leading-relaxed">
+                  <li>
+                    <strong>Paling Praktis (Tanpa Setting Tambahan):</strong> Bagikan dan buka langsung lewat URL resmi aplikasi Google AI Studio yang sudah terhubung ke server, database, dan Google Drive Anda:{' '}
+                    <a
+                      href="https://ais-pre-vx5ortm6ppcuaormaney5e-529565460483.asia-northeast1.run.app"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-emerald-700 font-semibold underline break-all"
+                    >
+                      Buka Link Resmi AI Studio
+                    </a>
+                  </li>
+                  <li>
+                    <strong>Jika Tetap Memakai Vercel:</strong>
+                    <ul className="list-disc pl-4 mt-1 space-y-1">
+                      <li>
+                        Tambahkan domain ini ke{' '}
+                        <a
+                          href="https://console.firebase.google.com/project/gen-lang-client-0382480062/authentication/settings"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-emerald-700 font-semibold underline"
+                        >
+                          Firebase Console → Authentication → Settings → Authorized domains
+                        </a>
+                        :{' '}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(currentHost).catch(() => {});
+                            setCopiedHostInfo('host');
+                            setTimeout(() => setCopiedHostInfo(''), 2000);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-slate-300 font-mono-tabular text-[11px] text-slate-800 hover:bg-slate-100 cursor-pointer"
+                        >
+                          <span>{currentHost}</span>
+                          {copiedHostInfo === 'host' ? (
+                            <Check className="w-3 h-3 text-emerald-700" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                        </button>
+                      </li>
+                      <li>
+                        Tambahkan origin ini ke{' '}
+                        <a
+                          href="https://console.cloud.google.com/apis/credentials?project=gen-lang-client-0382480062"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-emerald-700 font-semibold underline"
+                        >
+                          Google Cloud Console → Credentials → OAuth 2.0 Client → Authorized JavaScript origins
+                        </a>
+                        :{' '}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(currentOrigin).catch(() => {});
+                            setCopiedHostInfo('origin');
+                            setTimeout(() => setCopiedHostInfo(''), 2000);
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-white border border-slate-300 font-mono-tabular text-[11px] text-slate-800 hover:bg-slate-100 cursor-pointer"
+                        >
+                          <span>{currentOrigin}</span>
+                          {copiedHostInfo === 'origin' ? (
+                            <Check className="w-3 h-3 text-emerald-700" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                        </button>
+                      </li>
+                      <li>
+                        Atur Environment Variable <code className="font-mono-tabular bg-slate-200/70 px-1 rounded">VITE_APPS_SCRIPT_URL</code> di pengaturan Vercel agar jawaban siswa tetap menulis otomatis per bagian ke Google Drive Anda.
+                      </li>
+                    </ul>
+                  </li>
+                </ol>
+              </div>
+            )}
 
             {offlineCache && (
               <div className="pt-3 border-t border-slate-100">
