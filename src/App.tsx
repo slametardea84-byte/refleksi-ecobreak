@@ -15,7 +15,6 @@ import type { AppView, StudentIdentity, SubmissionRecord } from './types';
 export default function App() {
   const [view, setView] = useState<AppView>('login');
   const [googleUser, setGoogleUser] = useState<User | null>(null);
-  const [authReady, setAuthReady] = useState(false);
 
   const [student, setStudent] = useState<StudentIdentity | null>(null);
   const [existingSubmission, setExistingSubmission] = useState<SubmissionRecord | null>(null);
@@ -25,7 +24,6 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = initAuth((user) => {
       setGoogleUser(user);
-      setAuthReady(true);
     });
     return () => unsubscribe();
   }, []);
@@ -54,27 +52,17 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  if (!authReady) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50 text-slate-600 text-sm">
-        Menyiapkan portal refleksi...
-      </div>
-    );
-  }
-
   return (
     <>
       {view === 'login' && (
         <LoginView
-          googleUser={googleUser}
           onLoginSuccess={handleLoginSuccess}
           onOpenTeacherPortal={() => setShowTeacherModal(true)}
         />
       )}
 
-      {view === 'reflection' && googleUser && student && (
+      {view === 'reflection' && student && (
         <ReflectionFormView
-          googleUser={googleUser}
           student={student}
           existingSubmission={existingSubmission}
           onSubmitted={handleSubmitted}

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -6,109 +6,37 @@ import {
   CheckCircle2,
   Eye,
   EyeOff,
-  LogOut,
 } from 'lucide-react';
-import type { User } from 'firebase/auth';
 import {
   ABSEN_NUMBERS,
   CLASS_GROUPS,
   INSTRUCTIONS,
-  STUDENT_PASSWORD,
 } from '../data/questions';
-import {
-  getStudentSubmission,
-  logoutGoogle,
-  studentGoogleSignIn,
-} from '../lib/firebase';
 import type { StudentIdentity, SubmissionRecord } from '../types';
 import heroSchoolImg from '../assets/images/hero_school_ecobrick_1794620524862.jpg';
 
 interface LoginViewProps {
-  googleUser: User | null;
   onLoginSuccess: (identity: StudentIdentity, existing: SubmissionRecord | null) => void;
   onOpenTeacherPortal: () => void;
 }
 
-const GoogleLogoSvg = () => (
-  <svg
-    version="1.1"
-    xmlns="http://www.w3.org/2000/svg"
-    viewBox="0 0 48 48"
-    style={{ display: 'block' }}
-  >
-    <path
-      fill="#EA4335"
-      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-    />
-    <path
-      fill="#4285F4"
-      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-    />
-    <path
-      fill="#FBBC05"
-      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-    />
-    <path
-      fill="#34A853"
-      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-    />
-    <path fill="none" d="M0 0h48v48H0z" />
-  </svg>
-);
-
 export const LoginView: React.FC<LoginViewProps> = ({
-  googleUser,
   onLoginSuccess,
   onOpenTeacherPortal,
 }) => {
-  const [nama, setNama] = useState(googleUser?.displayName || '');
+  const [nama, setNama] = useState('');
   const [kelas, setKelas] = useState('');
   const [absen, setAbsen] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
-  const [isLoggingInGoogle, setIsLoggingInGoogle] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [imgError, setImgError] = useState(false);
-
-  useEffect(() => {
-    if (googleUser?.displayName && !nama) {
-      setNama(googleUser.displayName);
-    }
-  }, [googleUser, nama]);
-
-  const handleGoogleSignIn = async () => {
-    setError('');
-    setIsLoggingInGoogle(true);
-    try {
-      const signedInUser = await studentGoogleSignIn();
-      if (signedInUser.displayName) {
-        setNama((prev) => prev || signedInUser.displayName || '');
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : '';
-      if (!msg.includes('popup-closed-by-user')) {
-        setError('Gagal masuk dengan akun Google. Pastikan pop-up browser diizinkan lalu coba lagi.');
-      }
-    } finally {
-      setIsLoggingInGoogle(false);
-    }
-  };
-
-  const handleSwitchAccount = async () => {
-    setError('');
-    await logoutGoogle();
-    setNama('');
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
 
-    if (!googleUser) {
-      setError('Silakan login menggunakan akun Google kamu terlebih dahulu.');
-      return;
-    }
     if (nama.trim().length < 2) {
       setError('Mohon masukkan nama lengkap kamu dengan benar.');
       return;
@@ -121,27 +49,40 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setError('Mohon pilih nomor absen kamu (1–30).');
       return;
     }
-    if (password.trim() !== STUDENT_PASSWORD) {
-      setError('Password salah. Gunakan password kegiatan yang diberikan guru.');
+    if (!password.trim()) {
+      setError('Mohon masukkan password kegiatan.');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const existing = await getStudentSubmission(googleUser.uid);
-      onLoginSuccess(
-        {
-          uid: googleUser.uid,
-          email: googleUser.email || '',
+      const response = await fetch('/api/auth/student', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
           nama: nama.trim(),
           kelas,
           absen: Number(absen),
           password: password.trim(),
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        setError(data.error || 'Identitas atau password tidak sesuai.');
+        return;
+      }
+
+      onLoginSuccess(
+        {
+          nama: data.student.nama,
+          kelas: data.student.kelas,
+          absen: data.student.absen,
+          password: password.trim(),
         },
-        existing
+        data.existingSubmission || null
       );
     } catch {
-      setError('Gagal memuat data siswa dari database. Periksa koneksi internetmu dan coba lagi.');
+      setError('Tidak dapat terhubung ke server. Periksa koneksi internetmu dan coba lagi.');
     } finally {
       setIsSubmitting(false);
     }
@@ -191,7 +132,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 <span aria-hidden="true" className="text-slate-400">·</span>
                 <span className="text-slate-500">13 Kelas (71–95)</span>
                 <span aria-hidden="true" className="text-slate-400">·</span>
-                <span className="text-slate-500">Login Akun Google Siswa</span>
+                <span className="text-slate-500">Pengerjaan Individu</span>
               </div>
 
               <h1 className="font-display-serif text-3xl sm:text-4xl lg:text-[2.65rem] font-semibold tracking-tight text-slate-900 leading-[1.15] text-balance">
@@ -267,67 +208,19 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </div>
           </div>
 
-          {/* Right Column: Student Google Sign-In & Identity Form */}
+          {/* Right Column: Direct Student Identity Form (No Google Sign-In needed) */}
           <div id="masuk-siswa" className="lg:col-span-5 flex flex-col justify-center">
-            <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-sm space-y-6">
-              <div className="pb-4 border-b border-slate-100">
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 shadow-sm">
+              <div className="mb-6 pb-5 border-b border-slate-100">
                 <h2 className="text-xl font-bold text-slate-900">
-                  Masuk Siswa
+                  Identitas Siswa
                 </h2>
                 <p className="text-sm text-slate-500 mt-1">
-                  Masuk dengan akun Google masing-masing, lalu lengkapi identitas dan password kegiatan.
+                  Masukkan nama, kelas, nomor absen, dan password kegiatan tanpa perlu login akun Google.
                 </p>
               </div>
 
-              {/* Step 1: Google Account Login */}
-              <div className="space-y-2.5">
-                <span className="block text-xs font-semibold text-slate-500">
-                  Langkah 1 · Akun Google Siswa
-                </span>
-                {!googleUser ? (
-                  <button
-                    type="button"
-                    onClick={handleGoogleSignIn}
-                    disabled={isLoggingInGoogle}
-                    className="gsi-material-button"
-                  >
-                    <div className="gsi-material-button-content-wrapper">
-                      <div className="gsi-material-button-icon">
-                        <GoogleLogoSvg />
-                      </div>
-                      <span className="gsi-material-button-contents">
-                        {isLoggingInGoogle ? 'Menghubungkan...' : 'Sign in with Google'}
-                      </span>
-                    </div>
-                  </button>
-                ) : (
-                  <div className="flex items-center justify-between gap-3 p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200">
-                    <div className="min-w-0">
-                      <p className="text-xs font-semibold text-emerald-800">
-                        Akun Google Terhubung
-                      </p>
-                      <p className="text-sm font-medium text-slate-900 truncate">
-                        {googleUser.email}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleSwitchAccount}
-                      className="px-3 py-1.5 rounded-lg bg-white border border-slate-200 hover:bg-slate-50 text-xs font-medium text-slate-700 inline-flex items-center gap-1.5 shrink-0 cursor-pointer"
-                    >
-                      <LogOut className="w-3.5 h-3.5" />
-                      <span>Ganti Akun</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Step 2: Identitas & Password */}
-              <form onSubmit={handleSubmit} className="space-y-4 pt-2 border-t border-slate-100" noValidate>
-                <span className="block text-xs font-semibold text-slate-500">
-                  Langkah 2 · Identitas &amp; Password Kegiatan
-                </span>
-
+              <form onSubmit={handleSubmit} className="space-y-5" noValidate>
                 <div>
                   <label
                     htmlFor="student-name"
@@ -439,11 +332,11 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
                 <button
                   type="submit"
-                  disabled={isSubmitting || !googleUser}
-                  className="w-full min-h-[48px] px-6 py-3 bg-emerald-700 hover:bg-emerald-800 disabled:bg-slate-300 disabled:text-slate-500 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
+                  disabled={isSubmitting}
+                  className="w-full min-h-[48px] px-6 py-3 bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-semibold rounded-xl flex items-center justify-center gap-2 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700"
                 >
                   <span>
-                    {isSubmitting ? 'Memeriksa Data...' : 'Mulai Mengerjakan Refleksi'}
+                    {isSubmitting ? 'Memeriksa Identitas...' : 'Mulai Mengerjakan Refleksi'}
                   </span>
                   {!isSubmitting && <ArrowRight className="w-4 h-4" />}
                 </button>

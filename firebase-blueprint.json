@@ -2,21 +2,19 @@
   "entities": {
     "Submission": {
       "title": "Submission",
-      "description": "Individual student reflection submission tied to a verified Google account and class identity.",
+      "description": "Individual student reflection submission structured per part (Bagian 1, 2, 3, and Refleksi Akhir Diri).",
       "type": "object",
       "properties": {
         "uid": {
           "type": "string",
-          "description": "Firebase Auth UID of the student submitting the reflection.",
+          "description": "Canonical student identifier (e.g. kelas-absen).",
           "minLength": 1,
           "maxLength": 128,
           "pattern": "^[a-zA-Z0-9_\\-]+$"
         },
         "email": {
           "type": "string",
-          "format": "email",
-          "description": "Verified Google email address of the student.",
-          "minLength": 3,
+          "description": "Optional student email if provided.",
           "maxLength": 254
         },
         "nama": {
@@ -46,6 +44,10 @@
         "answers": {
           "type": "object",
           "description": "Map of question IDs (A1..R5) to student responses."
+        },
+        "completedParts": {
+          "type": "array",
+          "description": "List of completed reflection part IDs."
         },
         "skorPg": {
           "type": "integer",
@@ -78,6 +80,7 @@
         "absen",
         "accessCode",
         "answers",
+        "completedParts",
         "skorPg",
         "totalPg",
         "persentasePg",
@@ -164,7 +167,7 @@
   "firestore": {
     "/submissions/{submissionId}": {
       "schema": { "$ref": "#/entities/Submission" },
-      "description": "Stores each student's reflection answers keyed by their Firebase Auth UID."
+      "description": "Stores each student's structured reflection progress and answers."
     },
     "/settings/{settingId}": {
       "schema": { "$ref": "#/entities/DriveSyncSettings" },

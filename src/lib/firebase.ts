@@ -23,12 +23,8 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import {
-  ALL_MCQ_QUESTIONS,
-  ALL_QUESTIONS,
-  STUDENT_PASSWORD,
-} from '../data/questions';
-import type { DriveSyncSettings, StudentIdentity, SubmissionRecord } from '../types';
+import { ALL_MCQ_QUESTIONS, STUDENT_PASSWORD } from '../data/questions';
+import type { DriveSyncSettings, SubmissionRecord } from '../types';
 
 export const TEACHER_EMAIL = 'slametardea84@guru.smp.belajar.id';
 
@@ -53,10 +49,6 @@ export const SCOPES = [
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
-
-// Standard Google Auth provider for students
-const studentProvider = new GoogleAuthProvider();
-studentProvider.setCustomParameters({ prompt: 'select_account' });
 
 // Workspace Google Auth provider for teacher Drive & Sheets sync
 const workspaceProvider = new GoogleAuthProvider();
@@ -146,16 +138,6 @@ export const initAuth = (
   });
 };
 
-export const studentGoogleSignIn = async (): Promise<User> => {
-  isSigningIn = true;
-  try {
-    const result = await signInWithPopup(auth, studentProvider);
-    return result.user;
-  } finally {
-    isSigningIn = false;
-  }
-};
-
 export const teacherGoogleSignIn = async (): Promise<{
   user: User;
   accessToken: string;
@@ -204,6 +186,9 @@ function mapSubmissionDoc(id: string, data: Record<string, unknown>): Submission
     kelas: String(data.kelas || ''),
     absen: Number(data.absen || 0),
     answers: (data.answers as Record<string, string>) || {},
+    completedParts: Array.isArray(data.completedParts)
+      ? (data.completedParts as string[])
+      : [],
     skorPg: Number(data.skorPg || 0),
     totalPg: Number(data.totalPg || ALL_MCQ_QUESTIONS.length),
     persentasePg: Number(data.persentasePg || 0),
@@ -212,101 +197,70 @@ function mapSubmissionDoc(id: string, data: Record<string, unknown>): Submission
   };
 }
 
-export async function getStudentSubmission(
-  uid: string
-): Promise<SubmissionRecord | null> {
-  const path = `submissions/${uid}`;
-  try {
-    const snap = await getDoc(doc(db, 'submissions', uid));
-    if (!snap.exists()) return null;
-    return mapSubmissionDoc(snap.id, snap.data() as Record<string, unknown>);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
-  }
-}
+export async function syncServerSubmissionsToFirestore(
+  records: SubmissionRecord[]
+): Promise<void> {
+  for (const r of records) {
+    const docId = r.id.replace(/[^a-zA-Z0-9_-]/g, '-').slice(0, 128);
+    const docRef = doc(db, 'submissions', docId);
+    const path = `submissions/${docId}`;
 
-export async function saveStudentSubmission(
-  user: User,
-  identity: StudentIdentity,
-  rawAnswers: Record<string, string>
-): Promise<SubmissionRecord> {
-  const sanitizedAnswers: Record<string, string> = {};
-  for (const q of ALL_QUESTIONS) {
-    const val = (rawAnswers[q.id] || '').trim();
-    sanitizedAnswers[q.id] = q.type === 'mcq' ? val : val.slice(0, 2000);
-  }
-
-  let correct = 0;
-  for (const q of ALL_MCQ_QUESTIONS) {
-    if (sanitizedAnswers[q.id] === q.correctOption) {
-      correct += 1;
-    }
-  }
-  const totalPg = ALL_MCQ_QUESTIONS.length;
-  const persentasePg = totalPg > 0 ? Math.round((correct / totalPg) * 100) : 0;
-
-  const docRef = doc(db, 'submissions', user.uid);
-  const path = `submissions/${user.uid}`;
-
-  let existingSnap;
-  try {
-    existingSnap = await getDoc(docRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, path);
-  }
-
-  const sanitizedName = identity.nama.trim().slice(0, 100);
-
-  if (existingSnap && existingSnap.exists()) {
+    let existingSnap;
     try {
-      await updateDoc(docRef, {
-        nama: sanitizedName,
-        kelas: identity.kelas,
-        absen: Number(identity.absen),
-        answers: sanitizedAnswers,
-        skorPg: correct,
-        persentasePg,
-        updatedAt: serverTimestamp(),
-      });
+      existingSnap = await getDoc(docRef);
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, path);
+      handleFirestoreError(error, OperationType.GET, path);
     }
-  } else {
-    try {
-      await setDoc(docRef, {
-        uid: user.uid,
-        email: user.email || identity.email,
-        nama: sanitizedName,
-        kelas: identity.kelas,
-        absen: Number(identity.absen),
-        accessCode: STUDENT_PASSWORD,
-        answers: sanitizedAnswers,
-        skorPg: correct,
-        totalPg,
-        persentasePg,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, path);
+
+    const sanitizedName = r.nama.trim().slice(0, 100);
+    const completedParts =
+      Array.isArray(r.completedParts) && r.completedParts.length > 0
+        ? r.completedParts.slice(0, 4)
+        : [];
+
+    if (existingSnap && existingSnap.exists()) {
+      const existingData = existingSnap.data() as Record<string, unknown>;
+      const existingAnswers = (existingData.answers as Record<string, string>) || {};
+      const mergedAnswers = { ...existingAnswers, ...r.answers };
+      if (Object.keys(mergedAnswers).length > Object.keys(existingAnswers).length || r.updatedAt > toIsoString(existingData.updatedAt)) {
+        try {
+          await updateDoc(docRef, {
+            nama: sanitizedName,
+            email: (r.email || '').slice(0, 254),
+            kelas: r.kelas,
+            absen: Number(r.absen),
+            answers: mergedAnswers,
+            completedParts,
+            skorPg: Number(r.skorPg),
+            persentasePg: Number(r.persentasePg),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (error) {
+          handleFirestoreError(error, OperationType.UPDATE, path);
+        }
+      }
+    } else {
+      try {
+        await setDoc(docRef, {
+          uid: docId,
+          email: (r.email || '').slice(0, 254),
+          nama: sanitizedName,
+          kelas: r.kelas,
+          absen: Number(r.absen),
+          accessCode: STUDENT_PASSWORD,
+          answers: r.answers || {},
+          completedParts,
+          skorPg: Number(r.skorPg || 0),
+          totalPg: ALL_MCQ_QUESTIONS.length,
+          persentasePg: Number(r.persentasePg || 0),
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (error) {
+        handleFirestoreError(error, OperationType.CREATE, path);
+      }
     }
   }
-
-  const updated = await getStudentSubmission(user.uid);
-  if (!updated) {
-    throw new Error('Gagal membaca ulang data setelah penyimpanan.');
-  }
-
-  // Best-effort mirror to local server & optional teacher Apps Script webhook
-  fetch('/api/mirror-submission', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updated),
-  }).catch(() => {
-    // Non-blocking mirror
-  });
-
-  return updated;
 }
 
 export function subscribeAllSubmissions(

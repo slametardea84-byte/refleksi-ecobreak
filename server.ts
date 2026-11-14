@@ -1,10 +1,15 @@
 import express from 'express';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { createServer as createViteServer } from 'vite';
-import { ALL_CLASSES, ALL_MCQ_QUESTIONS, ALL_QUESTIONS, STUDENT_PASSWORD } from './src/data/questions.ts';
+import {
+  ALL_CLASSES,
+  ALL_MCQ_QUESTIONS,
+  ALL_QUESTIONS,
+  REFLECTION_PARTS,
+  STUDENT_PASSWORD,
+} from './src/data/questions.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,12 +22,13 @@ const TEACHER_EMAIL = 'slametardea84@guru.smp.belajar.id';
 
 export interface StoredSubmission {
   id: string;
-  uid?: string;
-  email?: string;
+  uid: string;
+  email: string;
   nama: string;
   kelas: string;
   absen: number;
   answers: Record<string, string>;
+  completedParts: string[];
   skorPg: number;
   totalPg: number;
   persentasePg: number;
@@ -103,6 +109,10 @@ function enqueueWrite<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
+function makeStudentKey(kelas: string, absen: number): string {
+  return `${kelas}-${String(absen).padStart(2, '0')}`;
+}
+
 async function verifyTeacherGoogleToken(authHeader?: string): Promise<boolean> {
   if (!authHeader || !authHeader.startsWith('Bearer ')) return false;
   const token = authHeader.slice('Bearer '.length).trim();
@@ -122,39 +132,70 @@ async function verifyTeacherGoogleToken(authHeader?: string): Promise<boolean> {
   }
 }
 
-async function forwardToAppsScript(submission: StoredSubmission): Promise<void> {
+function countPartCorrect(answers: Record<string, string>, prefixes: string[]): number {
+  let c = 0;
+  for (const q of ALL_MCQ_QUESTIONS) {
+    if (prefixes.some((p) => q.id.startsWith(p)) && answers[q.id] === q.correctOption) {
+      c += 1;
+    }
+  }
+  return c;
+}
+
+async function forwardToAppsScript(
+  submission: StoredSubmission,
+  savedPartId: string
+): Promise<boolean> {
   const cfg = await readTeacherConfig();
   const url = cfg.appsScriptWebhookUrl.trim();
-  if (!url || !url.startsWith('https://script.google.com/')) return;
+  if (!url || !url.startsWith('https://script.google.com/')) return false;
 
-  const questionAnswerPairs = ALL_QUESTIONS.map((q) => ({
-    id: q.id,
-    prompt: q.prompt,
-    answer: submission.answers[q.id] || '',
-  }));
+  const partQuestions = (partId: string) => {
+    const part = REFLECTION_PARTS.find((p) => p.id === partId);
+    if (!part) return [];
+    return part.subSections.flatMap((s) => s.questions).map((q) => {
+      const ans = submission.answers[q.id] || '';
+      const displayAnswer =
+        q.type === 'mcq' && ans in q.options
+          ? `${ans}. ${q.options[ans as keyof typeof q.options]}`
+          : ans;
+      return {
+        id: q.id,
+        prompt: q.prompt,
+        answer: displayAnswer,
+      };
+    });
+  };
 
   try {
-    await fetch(url, {
+    const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         id: submission.id,
-        uid: submission.uid || submission.id,
-        email: submission.email || '',
+        savedPartId,
         nama: submission.nama,
         kelas: submission.kelas,
         absen: submission.absen,
+        completedParts: submission.completedParts,
+        skorPgBagian1: countPartCorrect(submission.answers, ['A', 'B', 'C']),
+        skorPgBagian2: countPartCorrect(submission.answers, ['D', 'E']),
+        skorPgBagian3: countPartCorrect(submission.answers, ['F', 'G']),
         skorPg: submission.skorPg,
         totalPg: submission.totalPg,
         persentasePg: submission.persentasePg,
         submittedAt: submission.submittedAt,
         updatedAt: submission.updatedAt,
-        answers: submission.answers,
-        questionsAndAnswers: questionAnswerPairs,
+        bagian1QA: partQuestions('bagian-1'),
+        bagian2QA: partQuestions('bagian-2'),
+        bagian3QA: partQuestions('bagian-3'),
+        refleksiAkhirQA: partQuestions('refleksi-akhir'),
       }),
     });
+    return res.ok;
   } catch (err) {
     console.error('Apps Script forward failed:', err);
+    return false;
   }
 }
 
@@ -171,7 +212,7 @@ function validateStudentIdentity(body: unknown): {
   const { nama, kelas, absen, password } = body as Record<string, unknown>;
 
   if (typeof password !== 'string' || password.trim() !== STUDENT_PASSWORD) {
-    return { valid: false, error: 'Password salah. Gunakan password sekolah yang diberikan guru.' };
+    return { valid: false, error: 'Password salah. Gunakan password kegiatan yang diberikan guru.' };
   }
 
   if (typeof nama !== 'string' || nama.trim().length < 2 || nama.trim().length > 100) {
@@ -213,55 +254,213 @@ async function startServer() {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
 
-  // Mirror student submission from Firestore client to local backup & optional Apps Script webhook
-  app.post('/api/mirror-submission', async (req, res) => {
-    const body = req.body as Partial<StoredSubmission> | undefined;
-    if (!body || !body.uid || !body.nama || !body.kelas || !body.absen || !body.answers) {
-      res.status(400).json({ ok: false, error: 'Payload tidak lengkap.' });
+  // Student Login check (Nama, Kelas 71-95, Absen 1-30, Password SMPBHATUR)
+  app.post('/api/auth/student', async (req, res) => {
+    const check = validateStudentIdentity(req.body);
+    if (!check.valid || !check.kelas || !check.absen) {
+      res.status(400).json({ ok: false, error: check.error });
+      return;
+    }
+    const submissions = await readSubmissions();
+    const key = makeStudentKey(check.kelas, check.absen);
+    const existing = submissions.find(
+      (s) => s.id === key || (s.kelas === check.kelas && s.absen === check.absen)
+    );
+    res.json({
+      ok: true,
+      student: { nama: check.nama, kelas: check.kelas, absen: check.absen },
+      existingSubmission: existing || null,
+    });
+  });
+
+  // Save per-part progress (Bagian 1, Bagian 2, Bagian 3, Refleksi Akhir) and forward immediately to teacher Drive Apps Script
+  app.post('/api/submissions/part', async (req, res) => {
+    const check = validateStudentIdentity(req.body);
+    if (!check.valid || !check.nama || !check.kelas || !check.absen) {
+      res.status(400).json({ ok: false, error: check.error || 'Identitas tidak lengkap.' });
+      return;
+    }
+
+    const { partId, answers: rawAnswers } = req.body as {
+      partId?: string;
+      answers?: Record<string, unknown>;
+    };
+
+    const targetPart = REFLECTION_PARTS.find((p) => p.id === partId);
+    if (!targetPart) {
+      res.status(400).json({ ok: false, error: 'Bagian refleksi tidak dikenali.' });
+      return;
+    }
+
+    if (!rawAnswers || typeof rawAnswers !== 'object') {
+      res.status(400).json({ ok: false, error: 'Jawaban bagian ini belum diisi.' });
+      return;
+    }
+
+    const partQuestions = targetPart.subSections.flatMap((s) => s.questions);
+    for (const q of partQuestions) {
+      const val = rawAnswers[q.id];
+      if (typeof val !== 'string' || !val.trim()) {
+        res.status(400).json({
+          ok: false,
+          error: `Pertanyaan ${q.id} pada ${targetPart.shortTitle} belum dijawab.`,
+          missingQuestionId: q.id,
+        });
+        return;
+      }
+      if (q.type === 'mcq' && !['A', 'B', 'C', 'D'].includes(val.trim())) {
+        res.status(400).json({ ok: false, error: `Pilihan jawaban ${q.id} tidak valid.` });
+        return;
+      }
+    }
+
+    const studentKey = makeStudentKey(check.kelas, check.absen);
+    const now = new Date().toISOString();
+
+    const saved = await enqueueWrite(async () => {
+      const list = await readSubmissions();
+      const idx = list.findIndex(
+        (i) => i.id === studentKey || (i.kelas === check.kelas && i.absen === check.absen)
+      );
+
+      const mergedAnswers: Record<string, string> =
+        idx >= 0 ? { ...list[idx].answers } : {};
+      for (const q of ALL_QUESTIONS) {
+        const incomingVal = rawAnswers[q.id];
+        if (typeof incomingVal === 'string' && incomingVal.trim()) {
+          mergedAnswers[q.id] =
+            q.type === 'mcq' ? incomingVal.trim() : incomingVal.trim().slice(0, 2000);
+        }
+      }
+
+      const prevParts = idx >= 0 && Array.isArray(list[idx].completedParts) ? list[idx].completedParts : [];
+      const completedParts = Array.from(new Set([...prevParts, targetPart.id]));
+
+      const { skorPg, totalPg, persentasePg } = computeMcqScore(mergedAnswers);
+
+      const record: StoredSubmission = {
+        id: studentKey,
+        uid: studentKey,
+        email: idx >= 0 ? list[idx].email || '' : '',
+        nama: check.nama!,
+        kelas: check.kelas!,
+        absen: check.absen!,
+        answers: mergedAnswers,
+        completedParts,
+        skorPg,
+        totalPg,
+        persentasePg,
+        submittedAt: idx >= 0 ? list[idx].submittedAt : now,
+        updatedAt: now,
+      };
+
+      if (idx >= 0) {
+        list[idx] = record;
+      } else {
+        list.push(record);
+      }
+      await writeSubmissions(list);
+      return record;
+    });
+
+    const forwardedToDrive = await forwardToAppsScript(saved, targetPart.id);
+    res.json({ ok: true, submission: saved, forwardedToDrive });
+  });
+
+  // Final full submission endpoint
+  app.post('/api/submissions', async (req, res) => {
+    const check = validateStudentIdentity(req.body);
+    if (!check.valid || !check.nama || !check.kelas || !check.absen) {
+      res.status(400).json({ ok: false, error: check.error || 'Identitas tidak lengkap.' });
+      return;
+    }
+    const rawAnswers = (req.body as Record<string, unknown>).answers;
+    if (!rawAnswers || typeof rawAnswers !== 'object') {
+      res.status(400).json({ ok: false, error: 'Jawaban refleksi belum diisi.' });
       return;
     }
 
     const sanitizedAnswers: Record<string, string> = {};
     for (const q of ALL_QUESTIONS) {
-      const val = String((body.answers as Record<string, unknown>)[q.id] || '').trim();
-      sanitizedAnswers[q.id] = q.type === 'mcq' ? val : val.slice(0, 2000);
+      const val = (rawAnswers as Record<string, unknown>)[q.id];
+      if (typeof val !== 'string' || !val.trim()) {
+        res.status(400).json({
+          ok: false,
+          error: `Pertanyaan ${q.id} belum dijawab.`,
+          missingQuestionId: q.id,
+        });
+        return;
+      }
+      sanitizedAnswers[q.id] = q.type === 'mcq' ? val.trim() : val.trim().slice(0, 2000);
     }
 
     const { skorPg, totalPg, persentasePg } = computeMcqScore(sanitizedAnswers);
+    const studentKey = makeStudentKey(check.kelas, check.absen);
     const now = new Date().toISOString();
+    const allPartIds = REFLECTION_PARTS.map((p) => p.id);
 
-    const record: StoredSubmission = {
-      id: String(body.uid),
-      uid: String(body.uid),
-      email: String(body.email || ''),
-      nama: String(body.nama).trim().slice(0, 100),
-      kelas: String(body.kelas),
-      absen: Number(body.absen),
-      answers: sanitizedAnswers,
-      skorPg,
-      totalPg,
-      persentasePg,
-      submittedAt: String(body.submittedAt || now),
-      updatedAt: now,
-    };
-
-    await enqueueWrite(async () => {
+    const saved = await enqueueWrite(async () => {
       const list = await readSubmissions();
-      const idx = list.findIndex((s) => s.id === record.id);
+      const idx = list.findIndex(
+        (i) => i.id === studentKey || (i.kelas === check.kelas && i.absen === check.absen)
+      );
+      const record: StoredSubmission = {
+        id: studentKey,
+        uid: studentKey,
+        email: idx >= 0 ? list[idx].email || '' : '',
+        nama: check.nama!,
+        kelas: check.kelas!,
+        absen: check.absen!,
+        answers: sanitizedAnswers,
+        completedParts: allPartIds,
+        skorPg,
+        totalPg,
+        persentasePg,
+        submittedAt: idx >= 0 ? list[idx].submittedAt : now,
+        updatedAt: now,
+      };
       if (idx >= 0) {
-        list[idx] = { ...record, submittedAt: list[idx].submittedAt || record.submittedAt };
+        list[idx] = record;
       } else {
         list.push(record);
       }
       await writeSubmissions(list);
+      return record;
     });
 
-    // Fire Apps Script webhook if configured by teacher
-    await forwardToAppsScript(record);
-    res.json({ ok: true });
+    const forwardedToDrive = await forwardToAppsScript(saved, 'refleksi-akhir');
+    res.json({ ok: true, submission: saved, forwardedToDrive });
   });
 
-  // Teacher Google token-verified webhook settings
+  // Teacher Google-token verified endpoints
+  app.get('/api/teacher/submissions', async (req, res) => {
+    const authorized = await verifyTeacherGoogleToken(req.headers.authorization);
+    if (!authorized) {
+      res.status(401).json({ ok: false, error: 'Otorisasi akun guru diperlukan.' });
+      return;
+    }
+    const list = await readSubmissions();
+    list.sort((a, b) => (a.kelas !== b.kelas ? a.kelas.localeCompare(b.kelas) : a.absen - b.absen));
+    res.json({ ok: true, submissions: list });
+  });
+
+  app.delete('/api/teacher/submissions/:id', async (req, res) => {
+    const authorized = await verifyTeacherGoogleToken(req.headers.authorization);
+    if (!authorized) {
+      res.status(401).json({ ok: false, error: 'Otorisasi akun guru diperlukan.' });
+      return;
+    }
+    const targetId = req.params.id;
+    const deleted = await enqueueWrite(async () => {
+      const list = await readSubmissions();
+      const filtered = list.filter((s) => s.id !== targetId);
+      if (filtered.length === list.length) return false;
+      await writeSubmissions(filtered);
+      return true;
+    });
+    res.json({ ok: true, deleted });
+  });
+
   app.get('/api/teacher/webhook', async (req, res) => {
     const authorized = await verifyTeacherGoogleToken(req.headers.authorization);
     if (!authorized) {
@@ -292,83 +491,6 @@ async function startServer() {
     };
     await writeTeacherConfig(cfg);
     res.json({ ok: true, appsScriptWebhookUrl: cfg.appsScriptWebhookUrl, updatedAt: cfg.updatedAt });
-  });
-
-  // Legacy student check endpoint kept compatible
-  app.post('/api/auth/student', async (req, res) => {
-    const check = validateStudentIdentity(req.body);
-    if (!check.valid) {
-      res.status(400).json({ ok: false, error: check.error });
-      return;
-    }
-    const submissions = await readSubmissions();
-    const existing = submissions.find(
-      (s) => s.kelas === check.kelas && s.absen === check.absen
-    );
-    res.json({
-      ok: true,
-      student: { nama: check.nama, kelas: check.kelas, absen: check.absen },
-      existingSubmission: existing || null,
-    });
-  });
-
-  app.post('/api/submissions', async (req, res) => {
-    const check = validateStudentIdentity(req.body);
-    if (!check.valid || !check.nama || !check.kelas || !check.absen) {
-      res.status(400).json({ ok: false, error: check.error || 'Identitas tidak lengkap.' });
-      return;
-    }
-    const rawAnswers = (req.body as Record<string, unknown>).answers;
-    if (!rawAnswers || typeof rawAnswers !== 'object') {
-      res.status(400).json({ ok: false, error: 'Jawaban refleksi belum diisi.' });
-      return;
-    }
-    const sanitizedAnswers: Record<string, string> = {};
-    for (const q of ALL_QUESTIONS) {
-      const val = (rawAnswers as Record<string, unknown>)[q.id];
-      if (typeof val !== 'string' || !val.trim()) {
-        res.status(400).json({ ok: false, error: `Pertanyaan ${q.id} belum dijawab.` });
-        return;
-      }
-      sanitizedAnswers[q.id] = q.type === 'mcq' ? val.trim() : val.trim().slice(0, 2000);
-    }
-    const { skorPg, totalPg, persentasePg } = computeMcqScore(sanitizedAnswers);
-    const now = new Date().toISOString();
-    const saved = await enqueueWrite(async () => {
-      const list = await readSubmissions();
-      const idx = list.findIndex((i) => i.kelas === check.kelas && i.absen === check.absen);
-      if (idx >= 0) {
-        const updated: StoredSubmission = {
-          ...list[idx],
-          nama: check.nama!,
-          answers: sanitizedAnswers,
-          skorPg,
-          totalPg,
-          persentasePg,
-          updatedAt: now,
-        };
-        list[idx] = updated;
-        await writeSubmissions(list);
-        return updated;
-      }
-      const created: StoredSubmission = {
-        id: crypto.randomUUID(),
-        nama: check.nama!,
-        kelas: check.kelas!,
-        absen: check.absen!,
-        answers: sanitizedAnswers,
-        skorPg,
-        totalPg,
-        persentasePg,
-        submittedAt: now,
-        updatedAt: now,
-      };
-      list.push(created);
-      await writeSubmissions(list);
-      return created;
-    });
-    await forwardToAppsScript(saved);
-    res.json({ ok: true, submission: saved });
   });
 
   if (process.env.NODE_ENV === 'production') {

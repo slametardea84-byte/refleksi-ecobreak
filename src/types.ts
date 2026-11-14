@@ -1,6 +1,4 @@
 export interface StudentIdentity {
-  uid: string;
-  email: string;
   nama: string;
   kelas: string;
   absen: number;
@@ -15,6 +13,7 @@ export interface SubmissionRecord {
   kelas: string;
   absen: number;
   answers: Record<string, string>;
+  completedParts: string[];
   skorPg: number;
   totalPg: number;
   persentasePg: number;

@@ -59,9 +59,7 @@ export const CompletionView: React.FC<CompletionViewProps> = ({
             <span aria-hidden="true">·</span>
             <span className="font-mono-tabular">Absen {submission.absen}</span>
             <span aria-hidden="true">·</span>
-            <span>{submission.email}</span>
-            <span aria-hidden="true">·</span>
-            <span>Refleksi Tersimpan</span>
+            <span>Seluruh Bagian Tersimpan</span>
           </div>
 
           <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
@@ -100,7 +98,7 @@ export const CompletionView: React.FC<CompletionViewProps> = ({
                   Ringkasan Jawaban Refleksi
                 </h2>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  {submission.nama} · Kelas {submission.kelas} · Absen {submission.absen} · {submission.email}
+                  {submission.nama} · Kelas {submission.kelas} · Absen {submission.absen}
                 </p>
               </div>
               <div className="flex items-center gap-2 no-print">

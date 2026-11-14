@@ -39,19 +39,21 @@ service cloud.firestore {
     function isValidSubmission(data) {
       return data.keys().hasAll([
         'uid', 'email', 'nama', 'kelas', 'absen', 'accessCode',
-        'answers', 'skorPg', 'totalPg', 'persentasePg', 'createdAt', 'updatedAt'
+        'answers', 'completedParts', 'skorPg', 'totalPg', 'persentasePg', 'createdAt', 'updatedAt'
       ])
       && data.keys().hasOnly([
         'uid', 'email', 'nama', 'kelas', 'absen', 'accessCode',
-        'answers', 'skorPg', 'totalPg', 'persentasePg', 'createdAt', 'updatedAt'
+        'answers', 'completedParts', 'skorPg', 'totalPg', 'persentasePg', 'createdAt', 'updatedAt'
       ])
       && isValidId(data.uid)
-      && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+      && data.email is string && data.email.size() <= 254
       && data.nama is string && data.nama.size() >= 2 && data.nama.size() <= 100
       && data.kelas is string && data.kelas.size() == 2 && isValidKelas(data.kelas)
       && data.absen is int && data.absen >= 1 && data.absen <= 30
       && data.accessCode is string && data.accessCode == 'SMPBHATUR'
-      && data.answers is map && data.answers.size() == 54
+      && data.answers is map && data.answers.size() <= 54
+      && data.completedParts is list && data.completedParts.size() <= 4
+      && (data.completedParts.size() == 0 || data.completedParts[0] is string)
       && data.skorPg is int && data.skorPg >= 0 && data.skorPg <= 35
       && data.totalPg is int && data.totalPg == 35
       && data.persentasePg is int && data.persentasePg >= 0 && data.persentasePg <= 100
@@ -78,33 +80,22 @@ service cloud.firestore {
     }
 
     match /submissions/{submissionId} {
-      allow get: if isVerifiedUser() && isValidId(submissionId) && (submissionId == request.auth.uid || isAdmin());
-      allow list: if isAdmin() || (isVerifiedUser() && resource.data.uid == request.auth.uid);
-      allow create: if isVerifiedUser()
+      allow get: if isAdmin() && isValidId(submissionId);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
         && isValidId(submissionId)
-        && submissionId == request.auth.uid
         && isValidSubmission(incoming())
-        && incoming().uid == request.auth.uid
-        && incoming().email == request.auth.token.email
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time;
-      allow update: if isVerifiedUser()
+      allow update: if isAdmin()
         && isValidId(submissionId)
         && isValidSubmission(incoming())
         && incoming().uid == existing().uid
-        && incoming().email == existing().email
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
-        && (
-          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
-            'nama', 'kelas', 'absen', 'answers', 'skorPg', 'persentasePg', 'updatedAt'
-          ])) ||
-          (submissionId == request.auth.uid
-            && existing().uid == request.auth.uid
-            && incoming().diff(existing()).affectedKeys().hasOnly([
-              'nama', 'kelas', 'absen', 'answers', 'skorPg', 'persentasePg', 'updatedAt'
-            ]))
-        );
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'nama', 'email', 'kelas', 'absen', 'answers', 'completedParts', 'skorPg', 'persentasePg', 'updatedAt'
+        ]);
       allow delete: if isAdmin() && isValidId(submissionId);
     }
 

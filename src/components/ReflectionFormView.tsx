@@ -4,22 +4,20 @@ import {
   ArrowLeft,
   ArrowRight,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   Send,
 } from 'lucide-react';
-import type { User } from 'firebase/auth';
 import {
   ALL_QUESTIONS,
   INSTRUCTIONS,
   REFLECTION_PARTS,
   type OptionKey,
 } from '../data/questions';
-import { saveStudentSubmission } from '../lib/firebase';
 import type { StudentIdentity, SubmissionRecord } from '../types';
 
 interface ReflectionFormViewProps {
-  googleUser: User;
   student: StudentIdentity;
   existingSubmission: SubmissionRecord | null;
   onSubmitted: (submission: SubmissionRecord) => void;
@@ -29,13 +27,12 @@ interface ReflectionFormViewProps {
 const OPTION_KEYS: OptionKey[] = ['A', 'B', 'C', 'D'];
 
 export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
-  googleUser,
   student,
   existingSubmission,
   onSubmitted,
   onLogout,
 }) => {
-  const draftKey = `refleksi_draft_${student.uid}_${student.kelas}_${student.absen}`;
+  const draftKey = `refleksi_draft_${student.kelas}_${student.absen}`;
 
   const [answers, setAnswers] = useState<Record<string, string>>(() => {
     if (existingSubmission?.answers) {
@@ -53,11 +50,15 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
     return {};
   });
 
+  const [savedParts, setSavedParts] = useState<string[]>(
+    () => existingSubmission?.completedParts || []
+  );
   const [activePartIndex, setActivePartIndex] = useState(0);
   const [showInstructions, setShowInstructions] = useState(false);
   const [submitError, setSubmitError] = useState('');
+  const [partSavedBanner, setPartSavedBanner] = useState('');
   const [highlightedMissingId, setHighlightedMissingId] = useState<string | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isSavingPart, setIsSavingPart] = useState(false);
 
   useEffect(() => {
     try {
@@ -93,27 +94,87 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
   };
 
   const jumpToPart = (index: number) => {
+    setSubmitError('');
     setActivePartIndex(index);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const findFirstMissing = (): { partIndex: number; questionId: string } | null => {
-    for (let pIdx = 0; pIdx < REFLECTION_PARTS.length; pIdx++) {
-      const part = REFLECTION_PARTS[pIdx];
-      for (const sub of part.subSections) {
-        for (const q of sub.questions) {
-          if (!(answers[q.id] || '').trim()) {
-            return { partIndex: pIdx, questionId: q.id };
-          }
+  const findFirstMissingInPart = (partIndex: number): string | null => {
+    const part = REFLECTION_PARTS[partIndex];
+    for (const sub of part.subSections) {
+      for (const q of sub.questions) {
+        if (!(answers[q.id] || '').trim()) {
+          return q.id;
         }
       }
     }
     return null;
   };
 
+  const findFirstMissingGlobal = (): { partIndex: number; questionId: string } | null => {
+    for (let pIdx = 0; pIdx < REFLECTION_PARTS.length; pIdx++) {
+      const qId = findFirstMissingInPart(pIdx);
+      if (qId) return { partIndex: pIdx, questionId: qId };
+    }
+    return null;
+  };
+
+  const saveCurrentPartAndAdvance = async () => {
+    setSubmitError('');
+    setPartSavedBanner('');
+
+    const missingInCurrent = findFirstMissingInPart(activePartIndex);
+    if (missingInCurrent) {
+      setSubmitError(
+        `Lengkapi seluruh pertanyaan pada ${currentPart.shortTitle} sebelum menyimpan dan melanjutkan.`
+      );
+      setHighlightedMissingId(missingInCurrent);
+      const el = document.getElementById(`question-${missingInCurrent}`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+
+    setIsSavingPart(true);
+    try {
+      const response = await fetch('/api/submissions/part', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nama: student.nama,
+          kelas: student.kelas,
+          absen: student.absen,
+          password: student.password,
+          partId: currentPart.id,
+          answers,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        setSubmitError(data.error || 'Gagal menyimpan bagian ini.');
+        return;
+      }
+
+      setSavedParts(data.submission?.completedParts || []);
+      setPartSavedBanner(
+        `${currentPart.shortTitle} berhasil disimpan dan dikirim ke data guru.`
+      );
+      const nextIdx = activePartIndex + 1;
+      setActivePartIndex(nextIdx);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+    } catch {
+      setSubmitError(
+        'Koneksi terputus saat menyimpan bagian ini. Draft jawaban tetap aman di perangkat.'
+      );
+    } finally {
+      setIsSavingPart(false);
+    }
+  };
+
   const handleFinalSubmit = async () => {
     setSubmitError('');
-    const missing = findFirstMissing();
+    setPartSavedBanner('');
+
+    const missing = findFirstMissingGlobal();
     if (missing) {
       const remainingCount = totalCount - answeredCount;
       setSubmitError(
@@ -123,28 +184,41 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
       setHighlightedMissingId(missing.questionId);
       setTimeout(() => {
         const el = document.getElementById(`question-${missing.questionId}`);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 100);
       return;
     }
 
-    setIsSubmitting(true);
+    setIsSavingPart(true);
     try {
-      const saved = await saveStudentSubmission(googleUser, student, answers);
+      const response = await fetch('/api/submissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nama: student.nama,
+          kelas: student.kelas,
+          absen: student.absen,
+          password: student.password,
+          answers,
+        }),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        setSubmitError(data.error || 'Gagal mengirim refleksi akhir.');
+        return;
+      }
       try {
         localStorage.removeItem(draftKey);
       } catch {
         // ignore
       }
-      onSubmitted(saved);
+      onSubmitted(data.submission);
     } catch {
       setSubmitError(
-        'Gagal menyimpan jawaban ke database online. Draft jawabanmu tetap tersimpan di perangkat, silakan coba klik Kirim lagi.'
+        'Koneksi terputus saat mengirim jawaban. Draft jawaban tetap aman, silakan coba klik Kirim lagi.'
       );
     } finally {
-      setIsSubmitting(false);
+      setIsSavingPart(false);
     }
   };
 
@@ -163,18 +237,20 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
           >
             {REFLECTION_PARTS.map((part, idx) => {
               const isActive = idx === activePartIndex;
+              const isSaved = savedParts.includes(part.id);
               return (
                 <button
                   key={part.id}
                   type="button"
                   onClick={() => jumpToPart(idx)}
-                  className={`py-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                  className={`py-1 inline-flex items-center gap-1 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
                     isActive
                       ? 'text-emerald-700 font-semibold border-b-2 border-emerald-700'
                       : 'text-slate-500 hover:text-slate-900'
                   }`}
                 >
-                  {part.shortTitle}
+                  <span>{part.shortTitle}</span>
+                  {isSaved && <Check className="w-3.5 h-3.5 text-emerald-600" />}
                 </button>
               );
             })}
@@ -209,12 +285,10 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
               <span>Kelas {student.kelas}</span>
               <span aria-hidden="true">·</span>
               <span className="font-mono-tabular">Absen {student.absen}</span>
-              <span aria-hidden="true">·</span>
-              <span className="truncate max-w-[220px]">{student.email}</span>
             </div>
             {existingSubmission && (
               <p className="text-xs text-emerald-700">
-                Kamu sudah pernah mengirim refleksi ini sebelumnya. Kamu dapat memperbarui jawaban jika diperlukan.
+                Progres sebelumnya ditemukan ({savedParts.length}/4 bagian tersimpan). Kamu dapat melanjutkan atau memperbarui jawabanmu.
               </p>
             )}
           </div>
@@ -257,11 +331,12 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
           </div>
         )}
 
-        {/* Mobile / Tablet Part Switcher Tabs */}
+        {/* Part Switcher Tabs */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 p-1.5 bg-slate-200/70 rounded-xl">
           {REFLECTION_PARTS.map((part, idx) => {
             const isActive = idx === activePartIndex;
             const stats = partCompletion[idx];
+            const isSaved = savedParts.includes(part.id);
             const isComplete = stats.done === stats.total;
             return (
               <button
@@ -275,8 +350,9 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs sm:text-sm font-semibold truncate">
-                    {part.shortTitle}
+                  <span className="text-xs sm:text-sm font-semibold truncate inline-flex items-center gap-1">
+                    {isSaved && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />}
+                    <span>{part.shortTitle}</span>
                   </span>
                   <span
                     className={`font-mono-tabular text-xs shrink-0 ${
@@ -290,6 +366,13 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
             );
           })}
         </div>
+
+        {partSavedBanner && (
+          <div className="flex items-center gap-2.5 p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-900">
+            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+            <span>{partSavedBanner}</span>
+          </div>
+        )}
 
         {submitError && (
           <div
@@ -416,7 +499,7 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
           <button
             type="button"
             onClick={() => jumpToPart(Math.max(0, activePartIndex - 1))}
-            disabled={activePartIndex === 0}
+            disabled={activePartIndex === 0 || isSavingPart}
             className="min-h-[44px] px-5 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
           >
             <ArrowLeft className="w-4 h-4" />
@@ -426,21 +509,26 @@ export const ReflectionFormView: React.FC<ReflectionFormViewProps> = ({
           {activePartIndex < REFLECTION_PARTS.length - 1 ? (
             <button
               type="button"
-              onClick={() => jumpToPart(activePartIndex + 1)}
-              className="min-h-[44px] px-6 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+              onClick={saveCurrentPartAndAdvance}
+              disabled={isSavingPart}
+              className="min-h-[44px] px-6 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
-              <span>Lanjut ke {REFLECTION_PARTS[activePartIndex + 1].shortTitle}</span>
-              <ArrowRight className="w-4 h-4" />
+              <span>
+                {isSavingPart
+                  ? 'Menyimpan Bagian...'
+                  : `Simpan & Lanjut ke ${REFLECTION_PARTS[activePartIndex + 1].shortTitle}`}
+              </span>
+              {!isSavingPart && <ArrowRight className="w-4 h-4" />}
             </button>
           ) : (
             <button
               type="button"
               onClick={handleFinalSubmit}
-              disabled={isSubmitting}
+              disabled={isSavingPart}
               className="min-h-[48px] px-7 py-3 rounded-xl bg-emerald-700 hover:bg-emerald-800 disabled:bg-emerald-400 text-white text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
             >
               <Send className="w-4 h-4" />
-              <span>{isSubmitting ? 'Mengirim ke Cloud...' : 'Kirim Jawaban Refleksi'}</span>
+              <span>{isSavingPart ? 'Mengirim Jawaban...' : 'Kirim Jawaban Refleksi'}</span>
             </button>
           )}
         </div>

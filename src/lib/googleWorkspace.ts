@@ -1,10 +1,31 @@
-import { ALL_CLASSES, ALL_MCQ_QUESTIONS, ALL_QUESTIONS } from '../data/questions';
+import {
+  ALL_CLASSES,
+  ALL_MCQ_QUESTIONS,
+  ALL_QUESTIONS,
+  REFLECTION_PARTS,
+} from '../data/questions';
 import type { SubmissionRecord } from '../types';
 
 export const DRIVE_FOLDER_NAME = 'Refleksi Kokurikuler SMP Kemala Bhayangkari 7 Porong';
 export const SPREADSHEET_TITLE = 'Rekap Refleksi Kokurikuler (Kelas 71-95)';
 const BACKUP_JSON_NAME = 'backup-refleksi-kokurikuler.json';
 const BACKUP_CSV_NAME = 'rekap-refleksi-kokurikuler.csv';
+
+const TAB_REKAP = 'Rekap Status & Nilai';
+const TAB_BAG1 = 'Bagian 1 - Karakter';
+const TAB_BAG2 = 'Bagian 2 - Ecobrick';
+const TAB_BAG3 = 'Bagian 3 - Karya';
+const TAB_AKHIR = 'Refleksi Akhir Diri';
+const TAB_SUMMARY = 'Ringkasan Kelas';
+
+const DESIRED_TABS = [
+  TAB_REKAP,
+  TAB_BAG1,
+  TAB_BAG2,
+  TAB_BAG3,
+  TAB_AKHIR,
+  TAB_SUMMARY,
+];
 
 async function driveFetch(
   accessToken: string,
@@ -78,123 +99,161 @@ export async function ensureDriveFolder(
   return { folderId: created.id, folderName: created.name };
 }
 
-function countPartCorrect(s: SubmissionRecord, prefix: string): number {
+function countPartCorrect(s: SubmissionRecord, prefixes: string[]): number {
   let c = 0;
   for (const q of ALL_MCQ_QUESTIONS) {
-    if (q.id.startsWith(prefix) && s.answers[q.id] === q.correctOption) {
+    if (prefixes.some((p) => q.id.startsWith(p)) && s.answers[q.id] === q.correctOption) {
       c += 1;
     }
   }
   return c;
 }
 
-function buildSpreadsheetData(submissions: SubmissionRecord[]) {
+function getPartQuestions(partId: string) {
+  const part = REFLECTION_PARTS.find((p) => p.id === partId);
+  return part ? part.subSections.flatMap((s) => s.questions) : [];
+}
+
+function formatAnswerCell(
+  q: (typeof ALL_QUESTIONS)[number],
+  rawAns: string | undefined
+): string {
+  const ans = (rawAns || '').trim();
+  if (!ans) return '';
+  if (q.type === 'mcq' && ans in q.options) {
+    return `${ans}. ${q.options[ans as keyof typeof q.options]}`;
+  }
+  return ans;
+}
+
+function hasCompletedPart(s: SubmissionRecord, partId: string): boolean {
+  if (Array.isArray(s.completedParts) && s.completedParts.includes(partId)) {
+    return true;
+  }
+  const qs = getPartQuestions(partId);
+  return qs.length > 0 && qs.every((q) => Boolean((s.answers[q.id] || '').trim()));
+}
+
+function buildStructuredSheetData(
+  submissions: SubmissionRecord[]
+): Record<string, (string | number)[][]> {
   const sorted = [...submissions].sort((a, b) => {
     if (a.kelas !== b.kelas) return a.kelas.localeCompare(b.kelas);
     return a.absen - b.absen;
   });
 
-  // Tab 1: Rekap Nilai & Identitas (ringkas & mudah dibaca guru)
-  const nilaiHeaders = [
+  // 1. Rekap Status & Nilai
+  const rekapHeaders = [
     'No',
     'Kelas',
     'Absen',
-    'Nama Lengkap',
-    'Email Google Siswa',
-    'Status Pengerjaan',
-    'Skor PG (Benar)',
-    'Total Soal PG',
+    'Nama Siswa',
+    'Status Bagian 1',
+    'Status Bagian 2',
+    'Status Bagian 3',
+    'Status Refleksi Mandiri',
+    'PG Bagian 1 (/15)',
+    'PG Bagian 2 (/10)',
+    'PG Bagian 3 (/10)',
+    'Total Skor PG (/35)',
     'Nilai PG (%)',
-    'PG Bagian 1 (A-C /15)',
-    'PG Bagian 2 (D-E /10)',
-    'PG Bagian 3 (F-G /10)',
-    'Waktu Kirim',
     'Terakhir Diperbarui',
   ];
 
-  const nilaiRows = sorted.map((s, idx) => {
-    const b1 =
-      countPartCorrect(s, 'A') + countPartCorrect(s, 'B') + countPartCorrect(s, 'C');
-    const b2 = countPartCorrect(s, 'D') + countPartCorrect(s, 'E');
-    const b3 = countPartCorrect(s, 'F') + countPartCorrect(s, 'G');
+  const rekapRows = sorted.map((s, idx) => {
+    const b1 = countPartCorrect(s, ['A', 'B', 'C']);
+    const b2 = countPartCorrect(s, ['D', 'E']);
+    const b3 = countPartCorrect(s, ['F', 'G']);
     return [
       idx + 1,
       s.kelas,
       s.absen,
       s.nama,
-      s.email,
-      'Sudah Mengerjakan',
-      s.skorPg,
-      s.totalPg,
-      s.persentasePg,
+      hasCompletedPart(s, 'bagian-1') ? 'Selesai' : 'Belum',
+      hasCompletedPart(s, 'bagian-2') ? 'Selesai' : 'Belum',
+      hasCompletedPart(s, 'bagian-3') ? 'Selesai' : 'Belum',
+      hasCompletedPart(s, 'refleksi-akhir') ? 'Selesai' : 'Belum',
       b1,
       b2,
       b3,
-      new Date(s.submittedAt).toLocaleString('id-ID'),
+      s.skorPg,
+      s.persentasePg,
       new Date(s.updatedAt).toLocaleString('id-ID'),
     ];
   });
 
-  // Tab 2: Detail Pertanyaan & Jawaban (lengkap seluruh 54 pertanyaan & jawaban)
-  const detailHeaders = [
-    'No',
-    'Kelas',
-    'Absen',
-    'Nama Lengkap',
-    'Email Google Siswa',
-    'Nilai PG (%)',
-    'Waktu Kirim',
-    ...ALL_QUESTIONS.map((q) => `[${q.id}] ${q.prompt}`),
-  ];
+  // Helper to build per-part sheet
+  const buildPartSheet = (partId: string, scoreLabel?: string, scoreFn?: (s: SubmissionRecord) => number) => {
+    const qs = getPartQuestions(partId);
+    const headers = [
+      'Kelas',
+      'Absen',
+      'Nama Siswa',
+      'Status Bagian',
+      ...(scoreLabel ? [scoreLabel] : []),
+      ...qs.map((q) => `[${q.id}] ${q.prompt}`),
+      'Waktu Update',
+    ];
+    const rows = sorted.map((s) => [
+      s.kelas,
+      s.absen,
+      s.nama,
+      hasCompletedPart(s, partId) ? 'Selesai' : 'Belum',
+      ...(scoreFn ? [scoreFn(s)] : []),
+      ...qs.map((q) => formatAnswerCell(q, s.answers[q.id])),
+      new Date(s.updatedAt).toLocaleString('id-ID'),
+    ]);
+    return [headers, ...rows];
+  };
 
-  const detailRows = sorted.map((s, idx) => [
-    idx + 1,
-    s.kelas,
-    s.absen,
-    s.nama,
-    s.email,
-    s.persentasePg,
-    new Date(s.submittedAt).toLocaleString('id-ID'),
-    ...ALL_QUESTIONS.map((q) => {
-      const ans = s.answers[q.id] || '';
-      if (q.type === 'mcq' && ans in q.options) {
-        return `${ans}. ${q.options[ans as keyof typeof q.options]}`;
-      }
-      return ans;
-    }),
-  ]);
+  const bag1Values = buildPartSheet('bagian-1', 'Skor PG (/15)', (s) =>
+    countPartCorrect(s, ['A', 'B', 'C'])
+  );
+  const bag2Values = buildPartSheet('bagian-2', 'Skor PG (/10)', (s) =>
+    countPartCorrect(s, ['D', 'E'])
+  );
+  const bag3Values = buildPartSheet('bagian-3', 'Skor PG (/10)', (s) =>
+    countPartCorrect(s, ['F', 'G'])
+  );
+  const akhirValues = buildPartSheet('refleksi-akhir');
 
-  // Tab 3: Ringkasan Per Kelas (71-95)
+  // 6. Ringkasan Kelas
   const summaryHeaders = [
     'Kelas',
-    'Jumlah Siswa Selesai',
-    'Rata-rata Skor PG',
+    'Selesai Bagian 1',
+    'Selesai Bagian 2',
+    'Selesai Bagian 3',
+    'Selesai Refleksi Akhir',
+    'Rata-rata Skor PG (/35)',
     'Rata-rata Nilai PG (%)',
-    'Nilai Tertinggi (%)',
-    'Nilai Terendah (%)',
   ];
 
   const summaryRows = ALL_CLASSES.map((cls) => {
     const list = sorted.filter((s) => s.kelas === cls);
     const count = list.length;
     if (count === 0) {
-      return [cls, 0, 0, 0, 0, 0];
+      return [cls, 0, 0, 0, 0, 0, 0];
     }
+    const c1 = list.filter((s) => hasCompletedPart(s, 'bagian-1')).length;
+    const c2 = list.filter((s) => hasCompletedPart(s, 'bagian-2')).length;
+    const c3 = list.filter((s) => hasCompletedPart(s, 'bagian-3')).length;
+    const c4 = list.filter((s) => hasCompletedPart(s, 'refleksi-akhir')).length;
     const avgScore = Number(
       (list.reduce((acc, s) => acc + s.skorPg, 0) / count).toFixed(1)
     );
     const avgPct = Number(
       (list.reduce((acc, s) => acc + s.persentasePg, 0) / count).toFixed(1)
     );
-    const maxPct = Math.max(...list.map((s) => s.persentasePg));
-    const minPct = Math.min(...list.map((s) => s.persentasePg));
-    return [cls, count, avgScore, avgPct, maxPct, minPct];
+    return [cls, c1, c2, c3, c4, avgScore, avgPct];
   });
 
   return {
-    nilaiValues: [nilaiHeaders, ...nilaiRows],
-    detailValues: [detailHeaders, ...detailRows],
-    summaryValues: [summaryHeaders, ...summaryRows],
+    [TAB_REKAP]: [rekapHeaders, ...rekapRows],
+    [TAB_BAG1]: bag1Values,
+    [TAB_BAG2]: bag2Values,
+    [TAB_BAG3]: bag3Values,
+    [TAB_AKHIR]: akhirValues,
+    [TAB_SUMMARY]: [summaryHeaders, ...summaryRows],
   };
 }
 
@@ -204,12 +263,15 @@ function buildCsvString(submissions: SubmissionRecord[]): string {
   const headers = [
     'Kelas',
     'Absen',
-    'Nama Lengkap',
-    'Email Google',
+    'Nama Siswa',
+    'Bagian 1',
+    'Bagian 2',
+    'Bagian 3',
+    'Refleksi Akhir',
     'Skor PG',
     'Total PG',
     'Nilai PG (%)',
-    'Waktu Kirim',
+    'Terakhir Diperbarui',
     ...ALL_QUESTIONS.map((q) => `[${q.id}] ${q.prompt}`),
   ];
   const sorted = [...submissions].sort((a, b) =>
@@ -219,12 +281,15 @@ function buildCsvString(submissions: SubmissionRecord[]): string {
     esc(s.kelas),
     esc(s.absen),
     esc(s.nama),
-    esc(s.email),
+    esc(hasCompletedPart(s, 'bagian-1') ? 'Selesai' : 'Belum'),
+    esc(hasCompletedPart(s, 'bagian-2') ? 'Selesai' : 'Belum'),
+    esc(hasCompletedPart(s, 'bagian-3') ? 'Selesai' : 'Belum'),
+    esc(hasCompletedPart(s, 'refleksi-akhir') ? 'Selesai' : 'Belum'),
     esc(s.skorPg),
     esc(s.totalPg),
     esc(s.persentasePg),
-    esc(new Date(s.submittedAt).toLocaleString('id-ID')),
-    ...ALL_QUESTIONS.map((q) => esc(s.answers[q.id] || '')),
+    esc(new Date(s.updatedAt).toLocaleString('id-ID')),
+    ...ALL_QUESTIONS.map((q) => esc(formatAnswerCell(q, s.answers[q.id]))),
   ]);
   return '\uFEFF' + [headers.map(esc).join(','), ...rows.map((r) => r.join(','))].join('\r\n');
 }
@@ -262,7 +327,7 @@ async function upsertDriveTextFile(
       }
     );
   } else {
-    const boundary = 'refleksi_kokurikuler_boundary_v2';
+    const boundary = 'refleksi_kokurikuler_boundary_v3';
     const metadata = JSON.stringify({
       name: fileName,
       parents: [folderId],
@@ -310,8 +375,6 @@ export async function syncSubmissionsToGoogleWorkspace(
   let spreadsheetUrl = '';
   let sheetTabs: Array<{ id: number; title: string }> = [];
 
-  const desiredTabNames = ['Rekap Nilai', 'Detail Jawaban', 'Ringkasan Kelas'];
-
   if (spreadsheetId) {
     const metaRes = await driveFetch(
       accessToken,
@@ -331,7 +394,6 @@ export async function syncSubmissionsToGoogleWorkspace(
     }
   }
 
-  // Also search in folder if spreadsheetId is not known locally
   if (!spreadsheetId) {
     const q = encodeURIComponent(
       `name = '${SPREADSHEET_TITLE}' and '${folderId}' in parents and mimeType = 'application/vnd.google-apps.spreadsheet' and trashed = false`
@@ -372,7 +434,7 @@ export async function syncSubmissionsToGoogleWorkspace(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           properties: { title: SPREADSHEET_TITLE },
-          sheets: desiredTabNames.map((title) => ({ properties: { title } })),
+          sheets: DESIRED_TABS.map((title) => ({ properties: { title } })),
         }),
       }
     );
@@ -390,7 +452,6 @@ export async function syncSubmissionsToGoogleWorkspace(
       })
     );
 
-    // Move spreadsheet into target folder in Google Drive
     const fileInfoRes = await driveFetch(
       accessToken,
       `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(spreadsheetId)}?fields=parents`
@@ -408,9 +469,8 @@ export async function syncSubmissionsToGoogleWorkspace(
       { method: 'PATCH' }
     );
   } else {
-    // Ensure all 3 desired tabs exist
     const existingTitles = new Set(sheetTabs.map((t) => t.title));
-    const missingTabs = desiredTabNames.filter((name) => !existingTitles.has(name));
+    const missingTabs = DESIRED_TABS.filter((name) => !existingTitles.has(name));
     if (missingTabs.length > 0) {
       const addRes = await driveFetch(
         accessToken,
@@ -443,16 +503,7 @@ export async function syncSubmissionsToGoogleWorkspace(
     }
   }
 
-  const nilaiTab = sheetTabs.find((t) => t.title === 'Rekap Nilai') || sheetTabs[0];
-  const detailTab =
-    sheetTabs.find((t) => t.title === 'Detail Jawaban') ||
-    sheetTabs.find((t) => t.title === 'Semua Jawaban') ||
-    sheetTabs[1] ||
-    nilaiTab;
-  const summaryTab =
-    sheetTabs.find((t) => t.title === 'Ringkasan Kelas') || sheetTabs[2] || detailTab;
-
-  const { nilaiValues, detailValues, summaryValues } = buildSpreadsheetData(submissions);
+  const sheetDataMap = buildStructuredSheetData(submissions);
 
   await driveFetch(
     accessToken,
@@ -461,11 +512,7 @@ export async function syncSubmissionsToGoogleWorkspace(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        ranges: [
-          `'${nilaiTab.title}'!A1:Z5000`,
-          `'${detailTab.title}'!A1:ZZ5000`,
-          `'${summaryTab.title}'!A1:Z100`,
-        ],
+        ranges: DESIRED_TABS.map((t) => `'${t}'!A1:ZZ5000`),
       }),
     }
   );
@@ -478,11 +525,10 @@ export async function syncSubmissionsToGoogleWorkspace(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         valueInputOption: 'USER_ENTERED',
-        data: [
-          { range: `'${nilaiTab.title}'!A1`, values: nilaiValues },
-          { range: `'${detailTab.title}'!A1`, values: detailValues },
-          { range: `'${summaryTab.title}'!A1`, values: summaryValues },
-        ],
+        data: DESIRED_TABS.map((t) => ({
+          range: `'${t}'!A1`,
+          values: sheetDataMap[t],
+        })),
       }),
     }
   );
@@ -492,42 +538,43 @@ export async function syncSubmissionsToGoogleWorkspace(
     throw new Error(`Gagal menulis data ke Google Spreadsheet: ${errText}`);
   }
 
-  // Format header rows cleanly (bold, soft emerald tint, freeze top row)
-  const uniqueSheetIds = Array.from(
-    new Set([nilaiTab.id, detailTab.id, summaryTab.id])
-  );
-  await driveFetch(
-    accessToken,
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        requests: uniqueSheetIds.flatMap((sheetId) => [
-          {
-            updateSheetProperties: {
-              properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
-              fields: 'gridProperties.frozenRowCount',
-            },
-          },
-          {
-            repeatCell: {
-              range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
-              cell: {
-                userEnteredFormat: {
-                  backgroundColor: { red: 0.925, green: 0.992, blue: 0.961 },
-                  textFormat: { bold: true },
-                },
-              },
-              fields: 'userEnteredFormat(backgroundColor,textFormat)',
-            },
-          },
-        ]),
-      }),
-    }
-  );
+  const targetSheetIds = sheetTabs
+    .filter((t) => DESIRED_TABS.includes(t.title))
+    .map((t) => t.id);
 
-  // Save complete JSON & CSV backups in the same Google Drive folder
+  if (targetSheetIds.length > 0) {
+    await driveFetch(
+      accessToken,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          requests: targetSheetIds.flatMap((sheetId) => [
+            {
+              updateSheetProperties: {
+                properties: { sheetId, gridProperties: { frozenRowCount: 1 } },
+                fields: 'gridProperties.frozenRowCount',
+              },
+            },
+            {
+              repeatCell: {
+                range: { sheetId, startRowIndex: 0, endRowIndex: 1 },
+                cell: {
+                  userEnteredFormat: {
+                    backgroundColor: { red: 0.925, green: 0.992, blue: 0.961 },
+                    textFormat: { bold: true },
+                  },
+                },
+                fields: 'userEnteredFormat(backgroundColor,textFormat)',
+              },
+            },
+          ]),
+        }),
+      }
+    );
+  }
+
   const backupJson = JSON.stringify(
     {
       exportedAt: new Date().toISOString(),
@@ -585,7 +632,6 @@ export async function pullSubmissionsFromGoogleDrive(
     existing?.folderId
   );
 
-  // 1. Try reading structured JSON backup file in the Drive folder
   const qBackup = encodeURIComponent(
     `name = '${BACKUP_JSON_NAME}' and '${folderId}' in parents and trashed = false`
   );
@@ -612,7 +658,6 @@ export async function pullSubmissionsFromGoogleDrive(
     }
   }
 
-  // 2. Locate Spreadsheet in folder to return metadata (and fallback read if JSON backup missing)
   let spreadsheetId = existing?.spreadsheetId || '';
   let spreadsheetUrl = '';
   if (!spreadsheetId) {
@@ -640,60 +685,79 @@ export async function pullSubmissionsFromGoogleDrive(
       const meta = await metaRes.json();
       spreadsheetUrl = meta.spreadsheetUrl || '';
 
-      // If JSON backup wasn't found, reconstruct submissions from Detail Jawaban sheet
+      // If JSON backup is empty/missing, reconstruct from the structured per-part tabs
       if (submissions.length === 0) {
         const titles: string[] = (meta.sheets || []).map(
           (s: { properties?: { title?: string } }) => s.properties?.title || ''
         );
-        const targetTab =
-          titles.find((t) => t === 'Detail Jawaban') ||
-          titles.find((t) => t === 'Semua Jawaban') ||
-          titles[0];
-        if (targetTab) {
+        const partTabPairs: Array<{ tab: string; partId: string }> = [
+          { tab: TAB_BAG1, partId: 'bagian-1' },
+          { tab: TAB_BAG2, partId: 'bagian-2' },
+          { tab: TAB_BAG3, partId: 'bagian-3' },
+          { tab: TAB_AKHIR, partId: 'refleksi-akhir' },
+        ];
+        const mapByKey = new Map<string, SubmissionRecord>();
+        for (const { tab, partId } of partTabPairs) {
+          if (!titles.includes(tab)) continue;
           const valRes = await driveFetch(
             accessToken,
-            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(`'${targetTab}'!A1:ZZ5000`)}`
+            `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(`'${tab}'!A1:ZZ5000`)}`
           );
-          if (valRes.ok) {
-            const valData = await valRes.json();
-            const rows: string[][] = Array.isArray(valData.values) ? valData.values : [];
-            if (rows.length > 1) {
-              const headerRow = rows[0];
-              submissions = rows.slice(1).map((r, idx) => {
-                const answers: Record<string, string> = {};
-                ALL_QUESTIONS.forEach((q) => {
-                  const colIdx = headerRow.findIndex((h) => h.startsWith(`[${q.id}]`));
-                  const rawCell = colIdx >= 0 ? String(r[colIdx] || '') : '';
-                  if (q.type === 'mcq' && /^[A-D]\.\s/.test(rawCell)) {
-                    answers[q.id] = rawCell.charAt(0);
-                  } else {
-                    answers[q.id] = rawCell;
-                  }
-                });
-                let skorPg = 0;
-                for (const q of ALL_MCQ_QUESTIONS) {
-                  if (answers[q.id] === q.correctOption) skorPg += 1;
-                }
-                const totalPg = ALL_MCQ_QUESTIONS.length;
-                const persentasePg = Math.round((skorPg / totalPg) * 100);
-                return {
-                  id: `drive-${r[1] || 'x'}-${r[2] || idx}`,
-                  uid: `drive-${r[1] || 'x'}-${r[2] || idx}`,
-                  kelas: String(r[1] || ''),
-                  absen: Number(r[2] || 0),
-                  nama: String(r[3] || ''),
-                  email: String(r[4] || ''),
-                  answers,
-                  skorPg,
-                  totalPg,
-                  persentasePg,
-                  submittedAt: String(r[6] || new Date().toISOString()),
-                  updatedAt: String(r[6] || new Date().toISOString()),
-                };
-              });
+          if (!valRes.ok) continue;
+          const valData = await valRes.json();
+          const rows: string[][] = Array.isArray(valData.values) ? valData.values : [];
+          if (rows.length < 2) continue;
+          const headers = rows[0];
+          const qs = getPartQuestions(partId);
+          for (const r of rows.slice(1)) {
+            const kelas = String(r[0] || '');
+            const absen = Number(r[1] || 0);
+            const nama = String(r[2] || '');
+            const status = String(r[3] || '');
+            if (!kelas || !absen) continue;
+            const key = `${kelas}-${String(absen).padStart(2, '0')}`;
+            const rec = mapByKey.get(key) || {
+              id: key,
+              uid: key,
+              email: '',
+              nama,
+              kelas,
+              absen,
+              answers: {},
+              completedParts: [],
+              skorPg: 0,
+              totalPg: ALL_MCQ_QUESTIONS.length,
+              persentasePg: 0,
+              submittedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            };
+            if (status === 'Selesai' && !rec.completedParts.includes(partId)) {
+              rec.completedParts.push(partId);
             }
+            for (const q of qs) {
+              const colIdx = headers.findIndex((h) => h.startsWith(`[${q.id}]`));
+              const rawCell = colIdx >= 0 ? String(r[colIdx] || '') : '';
+              if (rawCell) {
+                rec.answers[q.id] =
+                  q.type === 'mcq' && /^[A-D]\.\s/.test(rawCell)
+                    ? rawCell.charAt(0)
+                    : rawCell;
+              }
+            }
+            mapByKey.set(key, rec);
           }
         }
+        submissions = Array.from(mapByKey.values()).map((rec) => {
+          let skorPg = 0;
+          for (const q of ALL_MCQ_QUESTIONS) {
+            if (rec.answers[q.id] === q.correctOption) skorPg += 1;
+          }
+          return {
+            ...rec,
+            skorPg,
+            persentasePg: Math.round((skorPg / ALL_MCQ_QUESTIONS.length) * 100),
+          };
+        });
       }
     }
   }

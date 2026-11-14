@@ -31,6 +31,7 @@ import {
   getWorkspaceAccessToken,
   saveDriveSyncSettings,
   subscribeAllSubmissions,
+  syncServerSubmissionsToFirestore,
   TEACHER_EMAIL,
   teacherGoogleSignIn,
 } from '../lib/firebase';
@@ -49,42 +50,85 @@ const OFFLINE_CACHE_KEY = 'teacher_refleksi_offline_cache_v1';
 
 interface OfflineCachePayload {
   savedAt: string;
-  source: 'firestore' | 'drive';
+  source: 'server-firestore' | 'drive';
   submissions: SubmissionRecord[];
 }
 
-const APPS_SCRIPT_TEMPLATE = `function doPost(e) {
-  var data = JSON.parse(e.postData.contents);
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheetNilai = ss.getSheetByName('Rekap Nilai') || ss.getSheets()[0];
-  if (sheetNilai.getLastRow() === 0) {
-    sheetNilai.appendRow(['Waktu Kirim', 'Kelas', 'Absen', 'Nama Lengkap', 'Email Google', 'Skor PG', 'Total PG', 'Nilai PG (%)']);
+const APPS_SCRIPT_TEMPLATE = `function upsertRowByKey(sheet, headers, kelas, absen, rowValues) {
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(headers);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#ECFDF5');
   }
-  sheetNilai.appendRow([
-    new Date(data.submittedAt).toLocaleString('id-ID'),
-    data.kelas,
-    data.absen,
-    data.nama,
-    data.email,
-    data.skorPg,
-    data.totalPg,
-    data.persentasePg
-  ]);
-
-  var sheetDetail = ss.getSheetByName('Detail Jawaban') || ss.insertSheet('Detail Jawaban');
-  var qa = data.questionsAndAnswers || [];
-  if (sheetDetail.getLastRow() === 0) {
-    var headers = ['Waktu Kirim', 'Kelas', 'Absen', 'Nama Lengkap', 'Email Google', 'Nilai PG (%)'];
-    for (var i = 0; i < qa.length; i++) {
-      headers.push('[' + qa[i].id + '] ' + qa[i].prompt);
+  var data = sheet.getDataRange().getValues();
+  var targetRow = -1;
+  for (var i = 1; i < data.length; i++) {
+    if (String(data[i][0]) === String(kelas) && Number(data[i][1]) === Number(absen)) {
+      targetRow = i + 1;
+      break;
     }
-    sheetDetail.appendRow(headers);
   }
-  var row = [new Date(data.submittedAt).toLocaleString('id-ID'), data.kelas, data.absen, data.nama, data.email, data.persentasePg];
-  for (var j = 0; j < qa.length; j++) {
-    row.push(qa[j].answer || '');
+  if (targetRow > 0) {
+    sheet.getRange(targetRow, 1, 1, rowValues.length).setValues([rowValues]);
+  } else {
+    sheet.appendRow(rowValues);
   }
-  sheetDetail.appendRow(row);
+}
+
+function getOrCreateTab(ss, name) {
+  return ss.getSheetByName(name) || ss.insertSheet(name);
+}
+
+function doPost(e) {
+  var d = JSON.parse(e.postData.contents);
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var parts = d.completedParts || [];
+  var waktu = new Date(d.updatedAt || d.submittedAt).toLocaleString('id-ID');
+
+  // 1. Tab Rekap Status & Nilai
+  var sRekap = getOrCreateTab(ss, 'Rekap Status & Nilai');
+  upsertRowByKey(
+    sRekap,
+    ['Kelas', 'Absen', 'Nama Siswa', 'Bagian 1', 'Bagian 2', 'Bagian 3', 'Refleksi Akhir', 'PG Bag 1 (/15)', 'PG Bag 2 (/10)', 'PG Bag 3 (/10)', 'Total PG (/35)', 'Nilai (%)', 'Update'],
+    d.kelas, d.absen,
+    [
+      d.kelas, d.absen, d.nama,
+      parts.indexOf('bagian-1') >= 0 ? 'Selesai' : 'Belum',
+      parts.indexOf('bagian-2') >= 0 ? 'Selesai' : 'Belum',
+      parts.indexOf('bagian-3') >= 0 ? 'Selesai' : 'Belum',
+      parts.indexOf('refleksi-akhir') >= 0 ? 'Selesai' : 'Belum',
+      d.skorPgBagian1 || 0, d.skorPgBagian2 || 0, d.skorPgBagian3 || 0,
+      d.skorPg || 0, d.persentasePg || 0, waktu
+    ]
+  );
+
+  // 2. Tab per Bagian (otomatis terisi saat siswa menyelesaikan bagian tersebut)
+  var tabConfig = [
+    { id: 'bagian-1', tab: 'Bagian 1 - Karakter', qa: d.bagian1QA || [], score: d.skorPgBagian1 },
+    { id: 'bagian-2', tab: 'Bagian 2 - Ecobrick', qa: d.bagian2QA || [], score: d.skorPgBagian2 },
+    { id: 'bagian-3', tab: 'Bagian 3 - Karya', qa: d.bagian3QA || [], score: d.skorPgBagian3 },
+    { id: 'refleksi-akhir', tab: 'Refleksi Akhir Diri', qa: d.refleksiAkhirQA || [], score: null }
+  ];
+
+  for (var t = 0; t < tabConfig.length; t++) {
+    var cfg = tabConfig[t];
+    if (parts.indexOf(cfg.id) < 0 || cfg.qa.length === 0) continue;
+    var sheet = getOrCreateTab(ss, cfg.tab);
+    var headers = ['Kelas', 'Absen', 'Nama Siswa', 'Status'];
+    var row = [d.kelas, d.absen, d.nama, 'Selesai'];
+    if (cfg.score !== null) {
+      headers.push('Skor PG');
+      row.push(cfg.score);
+    }
+    for (var k = 0; k < cfg.qa.length; k++) {
+      headers.push('[' + cfg.qa[k].id + '] ' + cfg.qa[k].prompt);
+      row.push(cfg.qa[k].answer || '');
+    }
+    headers.push('Waktu Update');
+    row.push(waktu);
+    upsertRowByKey(sheet, headers, d.kelas, d.absen, row);
+  }
+
   return ContentService.createTextOutput(JSON.stringify({ ok: true })).setMimeType(ContentService.MimeType.JSON);
 }`;
 
@@ -135,7 +179,7 @@ function readOfflineCache(): OfflineCachePayload | null {
 
 function writeOfflineCache(
   submissions: SubmissionRecord[],
-  source: 'firestore' | 'drive'
+  source: 'server-firestore' | 'drive'
 ): OfflineCachePayload {
   const payload: OfflineCachePayload = {
     savedAt: new Date().toISOString(),
@@ -148,6 +192,23 @@ function writeOfflineCache(
     // ignore storage quota errors
   }
   return payload;
+}
+
+function mergeSubmissionLists(
+  a: SubmissionRecord[],
+  b: SubmissionRecord[]
+): SubmissionRecord[] {
+  const map = new Map<string, SubmissionRecord>();
+  for (const item of [...a, ...b]) {
+    const key = `${item.kelas}-${String(item.absen).padStart(2, '0')}`;
+    const prev = map.get(key);
+    if (!prev || item.updatedAt > prev.updatedAt || Object.keys(item.answers).length >= Object.keys(prev.answers).length) {
+      map.set(key, item);
+    }
+  }
+  return Array.from(map.values()).sort((x, y) =>
+    x.kelas !== y.kelas ? x.kelas.localeCompare(y.kelas) : x.absen - y.absen
+  );
 }
 
 export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
@@ -166,12 +227,13 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
   const [authError, setAuthError] = useState('');
 
   const [firestoreSubmissions, setFirestoreSubmissions] = useState<SubmissionRecord[]>([]);
+  const [serverSubmissions, setServerSubmissions] = useState<SubmissionRecord[]>([]);
   const [drivePulledSubmissions, setDrivePulledSubmissions] = useState<
     SubmissionRecord[] | null
   >(null);
   const [dataSourceLabel, setDataSourceLabel] = useState<
-    'firestore' | 'drive' | 'offline-cache'
-  >('firestore');
+    'live' | 'drive' | 'offline-cache'
+  >('live');
 
   const [isLoadingSubmissions, setIsLoadingSubmissions] = useState(false);
   const [kelasFilter, setKelasFilter] = useState<string>('all');
@@ -213,7 +275,11 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
     Boolean(googleUser?.emailVerified) &&
     googleUser?.email?.toLowerCase() === TEACHER_EMAIL.toLowerCase();
 
-  // Active dataset displayed in table
+  const mergedLiveSubmissions = useMemo(
+    () => mergeSubmissionLists(firestoreSubmissions, serverSubmissions),
+    [firestoreSubmissions, serverSubmissions]
+  );
+
   const activeSubmissions = useMemo(() => {
     if (offlineModeView && offlineCache) {
       return offlineCache.submissions;
@@ -221,20 +287,20 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
     if (dataSourceLabel === 'drive' && drivePulledSubmissions) {
       return drivePulledSubmissions;
     }
-    if (!isOnline && firestoreSubmissions.length === 0 && offlineCache) {
+    if (!isOnline && mergedLiveSubmissions.length === 0 && offlineCache) {
       return offlineCache.submissions;
     }
-    return firestoreSubmissions;
+    return mergedLiveSubmissions;
   }, [
     offlineModeView,
     offlineCache,
     dataSourceLabel,
     drivePulledSubmissions,
     isOnline,
-    firestoreSubmissions,
+    mergedLiveSubmissions,
   ]);
 
-  // Subscribe to live Firestore submissions when authenticated as teacher
+  // Subscribe to Firestore + pull latest server submissions when teacher signs in
   useEffect(() => {
     if (!isTeacherAuthenticated) {
       setFirestoreSubmissions([]);
@@ -246,18 +312,9 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
       (list) => {
         setFirestoreSubmissions(list);
         setIsLoadingSubmissions(false);
-        if (list.length > 0) {
-          const cached = writeOfflineCache(list, 'firestore');
-          setOfflineCache(cached);
-        }
       },
       () => {
         setIsLoadingSubmissions(false);
-        if (offlineCache) {
-          setDataSourceLabel('offline-cache');
-        } else {
-          setAuthError('Gagal memuat data refleksi siswa dari Firestore.');
-        }
       }
     );
 
@@ -266,11 +323,29 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
         if (settings) setSyncSettings(settings);
       })
       .catch(() => {
-        // ignore if not yet created
+        // ignore
       });
 
     const token = getWorkspaceAccessToken();
     if (token) {
+      fetch('/api/teacher/submissions', {
+        headers: { Authorization: `Bearer ${token}` },
+      })
+        .then((r) => (r.ok ? r.json() : null))
+        .then((d) => {
+          if (d?.ok && Array.isArray(d.submissions)) {
+            setServerSubmissions(d.submissions);
+            if (d.submissions.length > 0) {
+              syncServerSubmissionsToFirestore(d.submissions).catch(() => {
+                // non-blocking
+              });
+            }
+          }
+        })
+        .catch(() => {
+          // ignore
+        });
+
       fetch('/api/teacher/webhook', {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -287,6 +362,14 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
 
     return () => unsub();
   }, [isTeacherAuthenticated]);
+
+  // Cache merged submissions locally for offline availability
+  useEffect(() => {
+    if (mergedLiveSubmissions.length > 0) {
+      const cached = writeOfflineCache(mergedLiveSubmissions, 'server-firestore');
+      setOfflineCache(cached);
+    }
+  }, [mergedLiveSubmissions]);
 
   const executeDriveSheetsSync = useCallback(
     async (recordsToSync: SubmissionRecord[]) => {
@@ -324,7 +407,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
 
         setSyncMessage({
           type: 'success',
-          text: `Berhasil menyimpan ${recordsToSync.length} data siswa (Rekap Nilai, Detail 54 Pertanyaan & Jawaban, Ringkasan Kelas, serta backup JSON & CSV) ke Google Drive Anda.`,
+          text: `Berhasil menyimpan ${recordsToSync.length} data siswa terstruktur ke Google Spreadsheet (6 tab per bagian) dan folder Google Drive Anda.`,
         });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -348,23 +431,22 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
     [googleUser, isTeacherAuthenticated, syncSettings]
   );
 
-  // Auto-sync whenever enabled by explicit confirmation and Firestore count changes
   useEffect(() => {
     if (
       autoSyncEnabled &&
       isTeacherAuthenticated &&
       isOnline &&
-      firestoreSubmissions.length > 0 &&
+      mergedLiveSubmissions.length > 0 &&
       !isSyncingDrive &&
-      syncSettings?.lastSyncedCount !== firestoreSubmissions.length
+      syncSettings?.lastSyncedCount !== mergedLiveSubmissions.length
     ) {
-      executeDriveSheetsSync(firestoreSubmissions);
+      executeDriveSheetsSync(mergedLiveSubmissions);
     }
   }, [
     autoSyncEnabled,
     isTeacherAuthenticated,
     isOnline,
-    firestoreSubmissions,
+    mergedLiveSubmissions,
     isSyncingDrive,
     syncSettings,
     executeDriveSheetsSync,
@@ -382,9 +464,28 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
         return;
       }
       setOfflineModeView(false);
-      const webhookRes = await fetch('/api/teacher/webhook', {
-        headers: { Authorization: `Bearer ${accessToken}` },
-      });
+
+      const [subRes, webhookRes] = await Promise.all([
+        fetch('/api/teacher/submissions', {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+        fetch('/api/teacher/webhook', {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      ]);
+
+      if (subRes.ok) {
+        const sd = await subRes.json();
+        if (sd?.ok && Array.isArray(sd.submissions)) {
+          setServerSubmissions(sd.submissions);
+          if (sd.submissions.length > 0) {
+            syncServerSubmissionsToFirestore(sd.submissions).catch(() => {
+              // non-blocking
+            });
+          }
+        }
+      }
+
       if (webhookRes.ok) {
         const wd = await webhookRes.json();
         if (wd?.ok && typeof wd.appsScriptWebhookUrl === 'string') {
@@ -511,7 +612,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
       setSyncMessage({
         type: 'success',
         text: webhookUrl.trim()
-          ? 'URL Google Apps Script tersimpan. Setiap siswa yang mengirim refleksi akan otomatis diteruskan ke Spreadsheet Anda.'
+          ? 'URL Google Apps Script tersimpan. Setiap bagian (Bagian 1, 2, 3, Refleksi Akhir) yang diselesaikan siswa otomatis langsung menulis rapi ke Google Spreadsheet Anda.'
           : 'URL Google Apps Script dinonaktifkan.',
       });
     } catch {
@@ -538,7 +639,16 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
     if (!confirmDeleteTarget) return;
     const target = confirmDeleteTarget;
     setConfirmDeleteTarget(null);
-    await deleteSubmissionById(target.id);
+
+    const token = getWorkspaceAccessToken();
+    if (token) {
+      await fetch(`/api/teacher/submissions/${encodeURIComponent(target.id)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      }).catch(() => {});
+    }
+    setServerSubmissions((prev) => prev.filter((s) => s.id !== target.id));
+    await deleteSubmissionById(target.id).catch(() => {});
     if (selectedSubmission?.id === target.id) {
       setSelectedSubmission(null);
     }
@@ -548,13 +658,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
     const q = searchQuery.trim().toLowerCase();
     return activeSubmissions.filter((s) => {
       if (kelasFilter !== 'all' && s.kelas !== kelasFilter) return false;
-      if (
-        q &&
-        !s.nama.toLowerCase().includes(q) &&
-        !s.email.toLowerCase().includes(q)
-      ) {
-        return false;
-      }
+      if (q && !s.nama.toLowerCase().includes(q)) return false;
       return true;
     });
   }, [activeSubmissions, kelasFilter, searchQuery]);
@@ -573,11 +677,14 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
       'Kelas',
       'No Absen',
       'Nama Siswa',
-      'Email Google',
+      'Bagian 1',
+      'Bagian 2',
+      'Bagian 3',
+      'Refleksi Akhir',
       'Skor PG',
       'Total PG',
       'Persentase PG (%)',
-      'Waktu Kirim',
+      'Terakhir Diperbarui',
       ...ALL_QUESTIONS.map((q) => `[${q.id}] ${q.prompt}`),
     ];
 
@@ -585,11 +692,14 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
       csvEscape(s.kelas),
       csvEscape(s.absen),
       csvEscape(s.nama),
-      csvEscape(s.email),
+      csvEscape(s.completedParts?.includes('bagian-1') ? 'Selesai' : 'Belum'),
+      csvEscape(s.completedParts?.includes('bagian-2') ? 'Selesai' : 'Belum'),
+      csvEscape(s.completedParts?.includes('bagian-3') ? 'Selesai' : 'Belum'),
+      csvEscape(s.completedParts?.includes('refleksi-akhir') ? 'Selesai' : 'Belum'),
       csvEscape(s.skorPg),
       csvEscape(s.totalPg),
       csvEscape(s.persentasePg),
-      csvEscape(new Date(s.submittedAt).toLocaleString('id-ID')),
+      csvEscape(new Date(s.updatedAt).toLocaleString('id-ID')),
       ...ALL_QUESTIONS.map((q) => csvEscape(s.answers[q.id] || '')),
     ]);
 
@@ -644,7 +754,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                 Masuk dengan Akun Google Guru
               </h3>
               <p className="text-sm text-slate-600 leading-relaxed">
-                Masuk menggunakan akun <span className="font-semibold text-slate-900">{TEACHER_EMAIL}</span> untuk menyimpan seluruh jawaban &amp; nilai ke Google Spreadsheet / Drive, serta menarik data dari Drive untuk akses offline.
+                Khusus guru pengelola (<span className="font-semibold text-slate-900">{TEACHER_EMAIL}</span>). Siswa tidak perlu login Google. Masuk untuk menarik data, melihat progres per bagian, dan menyimpan terstruktur ke Google Drive Anda.
               </p>
             </div>
 
@@ -712,8 +822,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                   {selectedSubmission.nama}
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  {selectedSubmission.email} · Kelas {selectedSubmission.kelas} · Absen{' '}
-                  {selectedSubmission.absen} · Skor PG:{' '}
+                  Kelas {selectedSubmission.kelas} · Absen {selectedSubmission.absen} · Skor PG:{' '}
                   <span className="font-mono-tabular font-semibold text-emerald-700">
                     {selectedSubmission.skorPg}/{selectedSubmission.totalPg} (
                     {selectedSubmission.persentasePg}%)
@@ -732,14 +841,21 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
             <div className="space-y-6">
               {REFLECTION_PARTS.map((part) => (
                 <div key={part.id} className="space-y-3">
-                  <h4 className="text-sm font-bold text-emerald-800 border-b border-slate-200 pb-1">
-                    {part.title}
-                  </h4>
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-1">
+                    <h4 className="text-sm font-bold text-emerald-800">
+                      {part.title}
+                    </h4>
+                    <span className="text-xs font-semibold text-slate-500">
+                      {selectedSubmission.completedParts?.includes(part.id)
+                        ? 'Status: Selesai'
+                        : 'Status: Belum Lengkap'}
+                    </span>
+                  </div>
                   {part.subSections.map((sub) => (
                     <div key={sub.id} className="space-y-2">
                       <p className="text-xs font-semibold text-slate-500">{sub.title}</p>
                       {sub.questions.map((q) => {
-                        const ans = selectedSubmission.answers[q.id] || '-';
+                        const ans = selectedSubmission.answers[q.id] || '';
                         const isCorrect = q.type === 'mcq' && ans === q.correctOption;
                         return (
                           <div
@@ -750,7 +866,9 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                               {q.number}. {q.prompt}
                             </p>
                             <p className="mt-1 text-slate-700">
-                              {q.type === 'mcq' && ans in q.options ? (
+                              {!ans ? (
+                                <span className="text-slate-400 italic">Belum dijawab</span>
+                              ) : q.type === 'mcq' && ans in q.options ? (
                                 <span>
                                   <span className="font-semibold">
                                     {ans}. {q.options[ans as OptionKey]}
@@ -798,7 +916,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                     type="button"
                     onClick={() => {
                       setOfflineModeView(false);
-                      setDataSourceLabel('firestore');
+                      setDataSourceLabel('live');
                     }}
                     className="px-3 py-1 rounded-lg bg-white border border-amber-300 font-semibold cursor-pointer"
                   >
@@ -815,19 +933,10 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                   <div className="space-y-1">
                     <div className="flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900">
                       <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
-                      <span>Google Spreadsheet &amp; Backup Google Drive</span>
-                      {syncSettings?.lastSyncedCount !== undefined && (
-                        <span className="text-xs font-normal text-slate-500">
-                          · Tersinkron {syncSettings.lastSyncedCount} siswa
-                          {firestoreSubmissions.length > syncSettings.lastSyncedCount &&
-                            ` (${firestoreSubmissions.length - syncSettings.lastSyncedCount} data baru menunggu)`}
-                        </span>
-                      )}
+                      <span>Google Spreadsheet &amp; Backup Google Drive ({TEACHER_EMAIL})</span>
                     </div>
                     <p className="text-xs text-slate-600">
-                      Menyimpan rapi 3 tab Spreadsheet (<strong>Rekap Nilai</strong>,{' '}
-                      <strong>Detail 54 Pertanyaan &amp; Jawaban</strong>,{' '}
-                      <strong>Ringkasan Kelas</strong>) + cadangan JSON &amp; CSV di Drive Anda.
+                      Tersusun rapi dalam <strong>6 tab per bagian</strong> (Rekap Status &amp; Nilai, Bagian 1, Bagian 2, Bagian 3, Refleksi Akhir Diri, Ringkasan Kelas) + cadangan JSON &amp; CSV.
                     </p>
                   </div>
 
@@ -888,17 +997,17 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                 {/* Source Switcher + Auto-Sync & 24/7 Apps Script Controls */}
                 <div className="pt-3 border-t border-emerald-200/70 flex flex-wrap items-center justify-between gap-3 text-xs">
                   <div className="flex flex-wrap items-center gap-3">
-                    <span className="text-slate-600 font-medium">Sumber Tampilan:</span>
+                    <span className="text-slate-600 font-medium">Sumber Data:</span>
                     <button
                       type="button"
-                      onClick={() => setDataSourceLabel('firestore')}
+                      onClick={() => setDataSourceLabel('live')}
                       className={`px-2.5 py-1 rounded-lg font-semibold cursor-pointer ${
-                        dataSourceLabel === 'firestore'
+                        dataSourceLabel === 'live'
                           ? 'bg-emerald-700 text-white'
                           : 'bg-white border border-slate-200 text-slate-700'
                       }`}
                     >
-                      Database Live ({firestoreSubmissions.length})
+                      Data Siswa Masuk ({mergedLiveSubmissions.length})
                     </button>
                     {drivePulledSubmissions && (
                       <button
@@ -937,7 +1046,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                       className="px-3 py-1.5 rounded-lg bg-white border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold inline-flex items-center gap-1.5 cursor-pointer"
                     >
                       <Settings2 className="w-3.5 h-3.5" />
-                      <span>Kirim Otomatis 24 Jam (Apps Script)</span>
+                      <span>Tulis Otomatis Per Bagian ke Drive (Apps Script)</span>
                     </button>
                   </div>
                 </div>
@@ -948,10 +1057,10 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                     <div className="flex items-start justify-between gap-3">
                       <div className="space-y-1">
                         <p className="font-bold text-slate-900">
-                          Kirim Otomatis ke Spreadsheet Saat Siswa Selesai (Meski Mode Guru Ditutup)
+                          Tulis Otomatis ke Spreadsheet Google Drive Anda Setiap Siswa Selesai Per Bagian (24 Jam)
                         </p>
                         <p className="text-slate-600 leading-relaxed">
-                          Agar baris jawaban langsung masuk ke Google Spreadsheet detik itu juga meski perangkat Anda mati/offline: buka Spreadsheet Anda → menu <strong>Ekstensi → Apps Script</strong> → tempel kode di bawah → <strong>Terapkan (Deploy) → Aplikasi Web</strong> (Jalankan sebagai: <em>Saya</em>, Yang memiliki akses: <em>Siapa saja</em>) → tempel URL-nya di bawah.
+                          Agar setiap siswa selesai mengerjakan <strong>Bagian 1, 2, 3, maupun Refleksi Akhir</strong> jawabannya langsung tertulis rapi di Google Drive Anda meski Mode Guru sedang ditutup: buka Spreadsheet di Drive Anda → <strong>Ekstensi → Apps Script</strong> → tempel skrip di bawah → <strong>Terapkan (Deploy) → Aplikasi Web</strong> (Jalankan sebagai: <em>Saya</em>, Yang memiliki akses: <em>Siapa saja</em>) → tempel URL-nya di bawah.
                         </p>
                       </div>
                       <button
@@ -968,7 +1077,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                       </button>
                     </div>
 
-                    <pre className="p-3 rounded-lg bg-slate-900 text-slate-100 font-mono-tabular text-[11px] overflow-x-auto max-h-40">
+                    <pre className="p-3 rounded-lg bg-slate-900 text-slate-100 font-mono-tabular text-[11px] overflow-x-auto max-h-44">
                       {APPS_SCRIPT_TEMPLATE}
                     </pre>
 
@@ -1016,7 +1125,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
             {/* Summary Strip Across 13 Classes */}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pb-4 border-b border-slate-200 text-xs text-slate-600">
               <span className="font-semibold text-slate-900">
-                Sudah Mengerjakan:{' '}
+                Total Siswa Mengerjakan:{' '}
                 <span className="font-mono-tabular text-emerald-700">
                   {activeSubmissions.length}
                 </span>{' '}
@@ -1048,7 +1157,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Cari nama atau email siswa..."
+                    placeholder="Cari nama siswa..."
                     className="w-full min-h-[40px] pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-600/20 focus:border-emerald-600"
                   />
                 </div>
@@ -1077,7 +1186,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
               </button>
             </div>
 
-            {/* Submissions Table */}
+            {/* Submissions Table with Per-Part Progress */}
             {isLoadingSubmissions && activeSubmissions.length === 0 ? (
               <p className="text-sm text-slate-500 py-8 text-center">
                 Memuat data refleksi siswa...
@@ -1094,53 +1203,85 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
                       <th className="py-3 px-4">Kelas</th>
                       <th className="py-3 px-4">Absen</th>
                       <th className="py-3 px-4">Nama Siswa</th>
-                      <th className="py-3 px-4">Akun Google</th>
+                      <th className="py-3 px-3 text-center">Bag. 1</th>
+                      <th className="py-3 px-3 text-center">Bag. 2</th>
+                      <th className="py-3 px-3 text-center">Bag. 3</th>
+                      <th className="py-3 px-3 text-center">Refleksi</th>
                       <th className="py-3 px-4">Skor PG</th>
                       <th className="py-3 px-4 text-right">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-200">
-                    {filteredSubmissions.map((item) => (
-                      <tr key={item.id} className="hover:bg-slate-50/70">
-                        <td className="py-3 px-4 font-mono-tabular font-semibold text-slate-900">
-                          {item.kelas}
-                        </td>
-                        <td className="py-3 px-4 font-mono-tabular text-slate-700">
-                          {item.absen}
-                        </td>
-                        <td className="py-3 px-4 font-medium text-slate-900">
-                          {item.nama}
-                        </td>
-                        <td className="py-3 px-4 text-xs text-slate-500">
-                          {item.email}
-                        </td>
-                        <td className="py-3 px-4 font-mono-tabular text-emerald-700 font-semibold">
-                          {item.skorPg}/{item.totalPg} ({item.persentasePg}%)
-                        </td>
-                        <td className="py-3 px-4 text-right">
-                          <div className="inline-flex items-center gap-1.5">
-                            <button
-                              type="button"
-                              onClick={() => setSelectedSubmission(item)}
-                              className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                              <span>Detail</span>
-                            </button>
-                            {isTeacherAuthenticated && dataSourceLabel === 'firestore' && (
+                    {filteredSubmissions.map((item) => {
+                      const hasPart = (id: string) =>
+                        item.completedParts?.includes(id) || false;
+                      return (
+                        <tr key={item.id} className="hover:bg-slate-50/70">
+                          <td className="py-3 px-4 font-mono-tabular font-semibold text-slate-900">
+                            {item.kelas}
+                          </td>
+                          <td className="py-3 px-4 font-mono-tabular text-slate-700">
+                            {item.absen}
+                          </td>
+                          <td className="py-3 px-4 font-medium text-slate-900">
+                            {item.nama}
+                          </td>
+                          <td className="py-3 px-3 text-center font-mono-tabular text-xs">
+                            {hasPart('bagian-1') ? (
+                              <span className="text-emerald-700 font-semibold">Selesai</span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-center font-mono-tabular text-xs">
+                            {hasPart('bagian-2') ? (
+                              <span className="text-emerald-700 font-semibold">Selesai</span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-center font-mono-tabular text-xs">
+                            {hasPart('bagian-3') ? (
+                              <span className="text-emerald-700 font-semibold">Selesai</span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-center font-mono-tabular text-xs">
+                            {hasPart('refleksi-akhir') ? (
+                              <span className="text-emerald-700 font-semibold">Selesai</span>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-4 font-mono-tabular text-emerald-700 font-semibold">
+                            {item.skorPg}/{item.totalPg} ({item.persentasePg}%)
+                          </td>
+                          <td className="py-3 px-4 text-right">
+                            <div className="inline-flex items-center gap-1.5">
                               <button
                                 type="button"
-                                onClick={() => setConfirmDeleteTarget(item)}
-                                aria-label={`Hapus data ${item.nama}`}
-                                className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                                onClick={() => setSelectedSubmission(item)}
+                                className="px-2.5 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-medium inline-flex items-center gap-1 cursor-pointer"
                               >
-                                <Trash2 className="w-4 h-4" />
+                                <Eye className="w-3.5 h-3.5" />
+                                <span>Detail</span>
                               </button>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
+                              {isTeacherAuthenticated && dataSourceLabel === 'live' && (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteTarget(item)}
+                                  aria-label={`Hapus data ${item.nama}`}
+                                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 transition-colors cursor-pointer"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1161,8 +1302,8 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
               Perbarui Google Spreadsheet &amp; Drive?
             </h3>
             <p className="text-sm text-slate-600 leading-relaxed">
-              Isi Google Spreadsheet <strong>Rekap Refleksi Kokurikuler</strong> dan file cadangan JSON/CSV di Google Drive akan diperbarui dengan{' '}
-              <strong className="font-mono-tabular">{activeSubmissions.length}</strong> data jawaban siswa terbaru.
+              Isi Google Spreadsheet <strong>Rekap Refleksi Kokurikuler</strong> (6 tab per bagian) dan file cadangan JSON/CSV di Google Drive Anda akan diperbarui dengan{' '}
+              <strong className="font-mono-tabular">{activeSubmissions.length}</strong> data siswa terbaru.
             </p>
             <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
@@ -1196,7 +1337,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
               Aktifkan Sinkronisasi Otomatis?
             </h3>
             <p className="text-sm text-slate-600 leading-relaxed">
-              Selama Mode Guru terbuka, setiap kali ada jawaban siswa baru yang masuk, aplikasi akan otomatis memperbarui isi Google Spreadsheet dan file cadangan di Google Drive Anda.
+              Selama Mode Guru terbuka, setiap kali ada progres bagian baru dari siswa, aplikasi akan otomatis memperbarui Google Spreadsheet dan cadangan di Google Drive Anda.
             </p>
             <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
@@ -1234,7 +1375,7 @@ export const TeacherDashboardModal: React.FC<TeacherDashboardModalProps> = ({
             </h3>
             <p className="text-sm text-slate-600 leading-relaxed">
               Data refleksi atas nama <strong>{confirmDeleteTarget.nama}</strong> (Kelas{' '}
-              {confirmDeleteTarget.kelas}, Absen {confirmDeleteTarget.absen}) akan dihapus dari database. Tindakan ini tidak dapat dibatalkan.
+              {confirmDeleteTarget.kelas}, Absen {confirmDeleteTarget.absen}) akan dihapus. Tindakan ini tidak dapat dibatalkan.
             </p>
             <div className="flex items-center justify-end gap-2.5 pt-2">
               <button
