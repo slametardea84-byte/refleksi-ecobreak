@@ -1,0 +1,135 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'slametardea84@guru.smp.belajar.id' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isValidKelas(k) {
+      return k in ['71', '72', '73', '81', '82', '83', '84', '85', '91', '92', '93', '94', '95'];
+    }
+
+    function isValidSubmission(data) {
+      return data.keys().hasAll([
+        'uid', 'email', 'nama', 'kelas', 'absen', 'accessCode',
+        'answers', 'skorPg', 'totalPg', 'persentasePg', 'createdAt', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'uid', 'email', 'nama', 'kelas', 'absen', 'accessCode',
+        'answers', 'skorPg', 'totalPg', 'persentasePg', 'createdAt', 'updatedAt'
+      ])
+      && isValidId(data.uid)
+      && data.email is string && data.email.size() >= 3 && data.email.size() <= 254
+      && data.nama is string && data.nama.size() >= 2 && data.nama.size() <= 100
+      && data.kelas is string && data.kelas.size() == 2 && isValidKelas(data.kelas)
+      && data.absen is int && data.absen >= 1 && data.absen <= 30
+      && data.accessCode is string && data.accessCode == 'SMPBHATUR'
+      && data.answers is map && data.answers.size() == 54
+      && data.skorPg is int && data.skorPg >= 0 && data.skorPg <= 35
+      && data.totalPg is int && data.totalPg == 35
+      && data.persentasePg is int && data.persentasePg >= 0 && data.persentasePg <= 100
+      && data.createdAt is timestamp
+      && data.updatedAt is timestamp;
+    }
+
+    function isValidDriveSyncSettings(data) {
+      return data.keys().hasAll([
+        'folderId', 'folderName', 'spreadsheetId', 'spreadsheetUrl',
+        'lastSyncedCount', 'updatedBy', 'updatedAt'
+      ])
+      && data.keys().hasOnly([
+        'folderId', 'folderName', 'spreadsheetId', 'spreadsheetUrl',
+        'lastSyncedCount', 'updatedBy', 'updatedAt'
+      ])
+      && data.folderId is string && data.folderId.size() >= 1 && data.folderId.size() <= 200
+      && data.folderName is string && data.folderName.size() >= 1 && data.folderName.size() <= 200
+      && data.spreadsheetId is string && data.spreadsheetId.size() >= 1 && data.spreadsheetId.size() <= 200
+      && data.spreadsheetUrl is string && data.spreadsheetUrl.size() >= 1 && data.spreadsheetUrl.size() <= 500
+      && data.lastSyncedCount is int && data.lastSyncedCount >= 0 && data.lastSyncedCount <= 5000
+      && data.updatedBy is string && data.updatedBy == request.auth.uid && data.updatedBy.size() <= 128
+      && data.updatedAt is timestamp;
+    }
+
+    match /submissions/{submissionId} {
+      allow get: if isVerifiedUser() && isValidId(submissionId) && (submissionId == request.auth.uid || isAdmin());
+      allow list: if isAdmin() || (isVerifiedUser() && resource.data.uid == request.auth.uid);
+      allow create: if isVerifiedUser()
+        && isValidId(submissionId)
+        && submissionId == request.auth.uid
+        && isValidSubmission(incoming())
+        && incoming().uid == request.auth.uid
+        && incoming().email == request.auth.token.email
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser()
+        && isValidId(submissionId)
+        && isValidSubmission(incoming())
+        && incoming().uid == existing().uid
+        && incoming().email == existing().email
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly([
+            'nama', 'kelas', 'absen', 'answers', 'skorPg', 'persentasePg', 'updatedAt'
+          ])) ||
+          (submissionId == request.auth.uid
+            && existing().uid == request.auth.uid
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'nama', 'kelas', 'absen', 'answers', 'skorPg', 'persentasePg', 'updatedAt'
+            ]))
+        );
+      allow delete: if isAdmin() && isValidId(submissionId);
+    }
+
+    match /settings/{settingId} {
+      allow get: if isAdmin() && isValidId(settingId);
+      allow list: if isAdmin();
+      allow create: if isAdmin()
+        && isValidId(settingId)
+        && isValidDriveSyncSettings(incoming())
+        && incoming().updatedAt == request.time;
+      allow update: if isAdmin()
+        && isValidId(settingId)
+        && isValidDriveSyncSettings(incoming())
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'folderId', 'folderName', 'spreadsheetId', 'spreadsheetUrl',
+          'lastSyncedCount', 'updatedBy', 'updatedAt'
+        ]);
+      allow delete: if isAdmin() && isValidId(settingId);
+    }
+
+    match /admins/{adminId} {
+      allow get: if isAdmin() && isValidId(adminId);
+      allow list: if isAdmin();
+      allow create, update, delete: if false;
+    }
+  }
+}

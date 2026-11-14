@@ -1,0 +1,6 @@
+{
+  "name": "Refleksi Kokurikuler SMP Kemala Bhayangkari 7 Porong",
+  "description": "Portal refleksi individu kegiatan kokurikuler mingguan siswa kelas 7, 8, dan 9 SMP Kemala Bhayangkari 7 Porong meliputi materi Sampah, BSAN, Hari Pahlawan, dan Pembuatan Ecobrick.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

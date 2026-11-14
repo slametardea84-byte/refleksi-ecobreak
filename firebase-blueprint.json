@@ -1,0 +1,178 @@
+{
+  "entities": {
+    "Submission": {
+      "title": "Submission",
+      "description": "Individual student reflection submission tied to a verified Google account and class identity.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the student submitting the reflection.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Google email address of the student.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "nama": {
+          "type": "string",
+          "description": "Full name entered by the student.",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "kelas": {
+          "type": "string",
+          "description": "Student class code across grades 7, 8, and 9.",
+          "enum": ["71", "72", "73", "81", "82", "83", "84", "85", "91", "92", "93", "94", "95"],
+          "minLength": 2,
+          "maxLength": 2
+        },
+        "absen": {
+          "type": "integer",
+          "description": "Student attendance number from 1 to 30."
+        },
+        "accessCode": {
+          "type": "string",
+          "description": "School activity access passcode verified at submission.",
+          "enum": ["SMPBHATUR"],
+          "minLength": 9,
+          "maxLength": 9
+        },
+        "answers": {
+          "type": "object",
+          "description": "Map of question IDs (A1..R5) to student responses."
+        },
+        "skorPg": {
+          "type": "integer",
+          "description": "Number of correct multiple-choice answers out of 35."
+        },
+        "totalPg": {
+          "type": "integer",
+          "description": "Total multiple-choice questions (35)."
+        },
+        "persentasePg": {
+          "type": "integer",
+          "description": "Multiple-choice score percentage (0 to 100)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when submission was first created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when submission was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "email",
+        "nama",
+        "kelas",
+        "absen",
+        "accessCode",
+        "answers",
+        "skorPg",
+        "totalPg",
+        "persentasePg",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DriveSyncSettings": {
+      "title": "DriveSyncSettings",
+      "description": "Teacher Google Drive folder and Google Spreadsheet sync metadata.",
+      "type": "object",
+      "properties": {
+        "folderId": {
+          "type": "string",
+          "description": "Google Drive folder ID where reflection backups and spreadsheet are stored.",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "folderName": {
+          "type": "string",
+          "description": "Human-readable name of the Google Drive folder.",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "spreadsheetId": {
+          "type": "string",
+          "description": "Google Spreadsheet ID for synced reflection responses.",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "spreadsheetUrl": {
+          "type": "string",
+          "description": "Direct URL to open the synced Google Spreadsheet.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "lastSyncedCount": {
+          "type": "integer",
+          "description": "Number of submissions included in the last sync."
+        },
+        "updatedBy": {
+          "type": "string",
+          "description": "Admin UID that performed the last sync.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the last sync."
+        }
+      },
+      "required": [
+        "folderId",
+        "folderName",
+        "spreadsheetId",
+        "spreadsheetUrl",
+        "lastSyncedCount",
+        "updatedBy",
+        "updatedAt"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized teacher account document.",
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified teacher email address.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin record was created."
+        }
+      },
+      "required": ["email", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/submissions/{submissionId}": {
+      "schema": { "$ref": "#/entities/Submission" },
+      "description": "Stores each student's reflection answers keyed by their Firebase Auth UID."
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/DriveSyncSettings" },
+      "description": "Stores Google Drive and Google Sheets sync targets for the teacher."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Stores additional authorized teacher UIDs."
+    }
+  }
+}
